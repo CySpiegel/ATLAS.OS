@@ -1,0 +1,166 @@
+name: Integration Tests (Arma 3)
+
+# Optional workflow — requires a self-hosted runner with Arma 3 Dedicated Server installed.
+# Trigger manually from the Actions tab, or automatically on release branches.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mission:
+        description: "Test mission to load (e.g. tests/integration.VR)"
+        required: false
+        default: "tests/integration.VR"
+      timeout:
+        description: "Max seconds to wait for server to complete tests"
+        required: false
+        default: "120"
+  push:
+    branches: [release/*]
+
+jobs:
+  integration:
+    name: Arma 3 Server Tests
+    runs-on: [self-hosted, arma3]
+    timeout-minutes: 10
+    env:
+      ARMA3_DIR: ${{ vars.ARMA3_SERVER_DIR || '/opt/arma3server' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup HEMTT
+        uses: arma-actions/hemtt@v1
+
+      - name: Build dev (with file patching)
+        run: hemtt dev
+
+      - name: Link mod to Arma server
+        run: |
+          ln -sfn "${{ github.workspace }}/.hemttout/dev/@ATLAS_OS" "${{ env.ARMA3_DIR }}/@ATLAS_OS"
+
+      - name: Prepare test mission
+        run: |
+          MISSION_DIR="${{ inputs.mission || 'tests/integration.VR' }}"
+          if [ ! -d "$MISSION_DIR" ]; then
+            echo "::error::Test mission not found at $MISSION_DIR"
+            exit 1
+          fi
+          # Copy mission to server mpmissions folder
+          cp -r "$MISSION_DIR" "${{ env.ARMA3_DIR }}/mpmissions/"
+
+      - name: Start Arma 3 Dedicated Server
+        id: server
+        run: |
+          MISSION_NAME=$(basename "${{ inputs.mission || 'tests/integration.VR' }}")
+
+          # Kill any existing server
+          pkill -f arma3server_x64 || true
+          sleep 2
+
+          # Launch server with test mission
+          cd "${{ env.ARMA3_DIR }}"
+          ./arma3server_x64 \
+            -autoInit \
+            -loadMission="$MISSION_NAME" \
+            -mod="@CBA_A3;@ATLAS_OS" \
+            -config=server.cfg \
+            -profiles=testprofiles \
+            -name=testprofiles \
+            -nosound \
+            -world=empty \
+            >> /tmp/arma3-test.log 2>&1 &
+
+          echo "pid=$!" >> "$GITHUB_OUTPUT"
+          echo "Server started with PID $!"
+
+      - name: Wait for test results
+        run: |
+          TIMEOUT="${{ inputs.timeout || '120' }}"
+          ELAPSED=0
+          RPT_DIR="${{ env.ARMA3_DIR }}/testprofiles"
+          RESULT_MARKER="ATLAS_TESTS_COMPLETE"
+
+          echo "Waiting up to ${TIMEOUT}s for tests to finish..."
+
+          while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+            # Look for the test completion marker in the latest RPT
+            RPT_FILE=$(ls -t "$RPT_DIR"/*.rpt 2>/dev/null | head -1)
+            if [ -n "$RPT_FILE" ] && grep -q "$RESULT_MARKER" "$RPT_FILE"; then
+              echo "Tests completed after ${ELAPSED}s"
+              break
+            fi
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+          done
+
+          if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+            echo "::error::Tests timed out after ${TIMEOUT}s"
+          fi
+
+      - name: Parse test results
+        if: always()
+        run: |
+          RPT_DIR="${{ env.ARMA3_DIR }}/testprofiles"
+          RPT_FILE=$(ls -t "$RPT_DIR"/*.rpt 2>/dev/null | head -1)
+
+          if [ -z "$RPT_FILE" ]; then
+            echo "::error::No RPT log file found"
+            exit 1
+          fi
+
+          echo "=== Test Output ==="
+          grep -E "^\[ATLAS_TEST\]" "$RPT_FILE" || true
+          echo "==================="
+
+          # Count pass/fail
+          PASSED=$(grep -c "\[ATLAS_TEST\] PASS:" "$RPT_FILE" || echo 0)
+          FAILED=$(grep -c "\[ATLAS_TEST\] FAIL:" "$RPT_FILE" || echo 0)
+          ERRORS=$(grep -c "\[ATLAS_TEST\] ERROR:" "$RPT_FILE" || echo 0)
+
+          echo "Results: $PASSED passed, $FAILED failed, $ERRORS errors"
+
+          # Write job summary
+          {
+            echo "## Arma 3 Integration Test Results"
+            echo ""
+            echo "| Status | Count |"
+            echo "|--------|-------|"
+            echo "| Passed | $PASSED |"
+            echo "| Failed | $FAILED |"
+            echo "| Errors | $ERRORS |"
+            echo ""
+            if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+              echo "### Failures"
+              echo '```'
+              grep -E "\[ATLAS_TEST\] (FAIL|ERROR):" "$RPT_FILE" || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -n "${{ steps.server.outputs.pid }}" ]; then
+            kill "${{ steps.server.outputs.pid }}" 2>/dev/null || true
+          fi
+          pkill -f arma3server_x64 || true
+
+      - name: Upload RPT logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arma3-rpt-logs-${{ github.sha }}
+          path: ${{ env.ARMA3_DIR }}/testprofiles/*.rpt
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f "${{ env.ARMA3_DIR }}/@ATLAS_OS"
+          rm -rf "${{ env.ARMA3_DIR }}/mpmissions/$(basename "${{ inputs.mission || 'tests/integration.VR' }}")"
+          rm -rf "${{ env.ARMA3_DIR }}/testprofiles"

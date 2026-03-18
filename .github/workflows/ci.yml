@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main, develop]
 
+env:
+  SQFVM_VERSION: "1.3.2-RC1"
+
 jobs:
   lint:
     name: Check & Lint
@@ -19,10 +22,54 @@ jobs:
       - name: Run HEMTT check
         run: hemtt check
 
+  sqf-lint:
+    name: SQF Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SQF-VM
+        id: cache-sqfvm
+        uses: actions/cache@v4
+        with:
+          path: ~/.sqfvm
+          key: sqfvm-${{ env.SQFVM_VERSION }}-linux-x64
+
+      - name: Download SQF-VM
+        if: steps.cache-sqfvm.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.sqfvm
+          curl -sL "https://github.com/SQFvm/runtime/releases/download/${{ env.SQFVM_VERSION }}/${{ env.SQFVM_VERSION | replace('-', '.') }}-Linux-x64.zip" \
+            -o /tmp/sqfvm.zip || \
+          curl -sL "https://github.com/SQFvm/runtime/releases/download/${{ env.SQFVM_VERSION }}/$(echo '${{ env.SQFVM_VERSION }}' | tr '-' '.')-Linux-x64.zip" \
+            -o /tmp/sqfvm.zip
+          unzip -o /tmp/sqfvm.zip -d ~/.sqfvm
+          chmod +x ~/.sqfvm/sqfvm
+
+      - name: Lint SQF files
+        run: |
+          export PATH="$HOME/.sqfvm:$PATH"
+          ERRORS=0
+
+          while IFS= read -r file; do
+            echo "Checking: $file"
+            if ! sqfvm --parse-only --input "$file" 2>&1; then
+              echo "::error file=$file::SQF parse error in $file"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done < <(find addons -name '*.sqf' -type f 2>/dev/null || true)
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::$ERRORS SQF file(s) failed parsing"
+            exit 1
+          fi
+
+          echo "All SQF files passed lint checks"
+
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, sqf-lint]
     steps:
       - uses: actions/checkout@v4
 
