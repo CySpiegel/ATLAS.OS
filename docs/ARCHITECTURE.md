@@ -343,13 +343,13 @@ ATLAS_fnc_gridQuery = {
 
 **Performance impact:**
 
-| Scenario | ALiVE O(n×m) | ATLAS.OS Grid Query | Speedup |
+| Scenario | ALiVE: Distance Checks (n×m) | ATLAS.OS: Distance Checks (grid candidates) | Reduction |
 |---|---|---|---|
-| 200 profiles, 10 players | Check 2,000 distances | Check ~20 grid cells | **~100x fewer checks** |
-| 500 profiles, 20 players | Check 10,000 distances | Check ~20 grid cells | **~500x fewer checks** |
-| 1000 profiles, 40 players | Check 40,000 distances | Check ~20 grid cells | **~2000x fewer checks** |
+| 200 profiles, 10 players | 200×10 = **2,000** | ~30 candidates (avg ~3/player × 10) | **~67x fewer** |
+| 500 profiles, 20 players | 500×20 = **10,000** | ~60 candidates (avg ~3/player × 20) | **~167x fewer** |
+| 1000 profiles, 40 players | 1000×40 = **40,000** | ~120 candidates (avg ~3/player × 40) | **~333x fewer** |
 
-The grid query returns only profiles in nearby cells, then a precise distance check is performed only on that small subset.
+**How it works**: ALiVE computes distance from every profile to every player (O(n×m)). ATLAS.OS first uses the spatial grid to find only the ~3 profiles per player that are actually in nearby cells, then performs precise distance checks on just those candidates. Both sides do the same 0.005ms distance calculation — the grid just eliminates 99%+ of them.
 
 ### 5.4 Profile ID Generation
 
@@ -954,9 +954,9 @@ Event-driven UI updates instead of polling:
 | System | ALiVE Approach | ATLAS.OS Approach | Estimated Improvement |
 |---|---|---|---|
 | **Data Access (hash lookups)** | Custom parallel-array hash, O(n) find, 0.0116ms | Native HashMap, O(1), 0.0018ms | **6.4x faster** per lookup |
-| **Profile Proximity** | O(n×m) all profiles × all players, every cycle | Spatial grid O(1) cell lookup + event-driven | **100-2000x fewer comparisons** |
+| **Profile Proximity** | O(n×m) all profiles × all players, every cycle | Spatial grid O(1) cell lookup + event-driven | **67-333x fewer distance checks** |
 | **OPCOM Decision Cycle** | Full recalculation every 30-120s | Incremental dirty-flag + event interrupt | **3-10x less computation** |
-| **Spawn/Despawn** | Poll all profiles on timer, binary threshold | Event-driven on player movement, hysteresis | **Eliminates thrashing + 50x fewer checks** |
+| **Spawn/Despawn** | Poll all profiles on timer, binary threshold | Event-driven on player movement, hysteresis | **Eliminates thrashing** (uses same spatial grid as proximity) |
 | **Civilian System** | Create/destroy agents constantly | Object pooling + reuse | **~5x fewer object operations** |
 | **Persistence** | Serialize entire world state | Incremental dirty-profile-only save | **5-20x less data per save** |
 | **Garbage Collection** | Scheduled loop over all dead entities | Event-driven queue + per-frame budget | **Eliminates GC frame spikes** |
@@ -966,13 +966,15 @@ Event-driven UI updates instead of polling:
 
 Typical ALiVE mission with ~300 virtual profiles, 20 players, 50 objectives:
 
-| Metric | ALiVE (estimated) | ATLAS.OS (projected) |
-|---|---|---|
-| **Hash lookups per cycle** | ~5,000 @ 0.0116ms = 58ms | ~5,000 @ 0.0018ms = **9ms** |
-| **Proximity checks per cycle** | 6,000 comparisons @ 0.005ms = 30ms | ~60 comparisons = **0.3ms** |
-| **OPCOM scoring** | 50 objectives × full eval = ~25ms | ~5 dirty objectives = **2.5ms** |
-| **Total per-cycle overhead** | ~113ms+ | **~12ms** |
-| **Effective frame budget recovered** | — | **~100ms per cycle** |
+| Metric | ALiVE (estimated) | ATLAS.OS (projected) | How |
+|---|---|---|---|
+| **Hash lookups per cycle** | ~5,000 @ 0.0116ms = 58ms | ~5,000 @ 0.0018ms = **9ms** | Native HashMap O(1) vs parallel-array O(n) |
+| **Proximity distance checks** | 300×20 = 6,000 @ 0.005ms = 30ms | ~60 candidates @ 0.005ms = **0.3ms** | Grid pre-filters: only ~3 candidates per player instead of all 300 |
+| **OPCOM scoring** | 50 objectives × full eval = ~25ms | ~5 dirty objectives = **2.5ms** | Dirty-flag skips unchanged objectives |
+| **Total per-cycle overhead** | ~113ms+ | **~12ms** | |
+| **Effective frame budget recovered** | — | **~100ms per cycle** | |
+
+**How the proximity numbers work**: ALiVE checks *every* profile against *every* player each cycle: 300 × 20 = 6,000 distance calculations. ATLAS.OS uses a spatial grid so each player only queries nearby cells, yielding ~3 candidate profiles per player on average: 20 × 3 = 60 distance calculations. The per-check cost (0.005ms) is identical — the savings come entirely from doing far fewer checks.
 
 **This translates to roughly 5-10 additional server FPS** in a heavily loaded mission, or the ability to support **2-3x more virtual profiles** at the same performance level.
 
@@ -1154,7 +1156,7 @@ if (isServer) then {
 | Dimension | ALiVE.OS | ATLAS.OS | Why It Matters |
 |---|---|---|---|
 | **Data structures** | Custom parallel-array hashes | Native HashMaps | 6.4x faster lookups, clean API |
-| **Spatial queries** | O(n×m) brute force | Grid-based spatial index | 100-2000x fewer comparisons |
+| **Spatial queries** | O(n×m) brute force | Grid-based spatial index | 67-333x fewer distance checks (see Section 5.3) |
 | **Execution model** | Mostly scheduled, polling | Mostly unscheduled, event-driven | Eliminates scheduler contention |
 | **Reactivity** | Poll every 10-120s | Instant event response | Sub-second reaction to battlefield changes |
 | **State management** | Monolithic save/load | Incremental dirty-flag persistence | 5-20x less serialization per save |
