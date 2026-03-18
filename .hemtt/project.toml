@@ -1,0 +1,22 @@
+name = "ATLAS.OS"
+prefix = "atlas"
+mainprefix = "z"
+
+[properties]
+author = "ATLAS.OS Team"
+url = "https://github.com/CySpiegel/ATLAS.OS"
+
+[files]
+include = [
+    "mod.cpp",
+    "meta.cpp",
+    "LICENSE",
+    "logo_ca.paa",
+    "logo_co.paa",
+]
+exclude = [
+    "*.psd",
+    "*.png",
+    "*.tga",
+    "docs/**",
+]
