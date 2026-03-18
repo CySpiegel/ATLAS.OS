@@ -949,34 +949,34 @@ Event-driven UI updates instead of polling:
 
 ## 9. Performance Improvement Projections
 
-### 9.1 Per-System Improvement Estimates
+### 9.1 Per-System Algorithmic Improvements
 
-| System | ALiVE Approach | ATLAS.OS Approach | Estimated Improvement |
+These improvements are based on the *algorithmic complexity* changes between ALiVE's architecture and ATLAS.OS's design. They do not represent measured benchmarks — actual performance gains will depend on mission scale, hardware, and workload. These must be validated with real profiling once the systems are implemented (see §9.2).
+
+| System | ALiVE Approach | ATLAS.OS Approach | Complexity Reduction |
 |---|---|---|---|
-| **Data Access (hash lookups)** | Custom parallel-array hash, O(n) find, 0.0116ms | Native HashMap, O(1), 0.0018ms | **6.4x faster** per lookup |
-| **Profile Proximity** | O(n×m) all profiles × all players, every cycle | Spatial grid O(1) cell lookup + event-driven | **67-333x fewer distance checks** |
-| **OPCOM Decision Cycle** | Full recalculation every 30-120s | Incremental dirty-flag + event interrupt | **3-10x less computation** |
-| **Spawn/Despawn** | Poll all profiles on timer, binary threshold | Event-driven on player movement, hysteresis | **Eliminates thrashing** (uses same spatial grid as proximity) |
-| **Civilian System** | Create/destroy agents constantly | Object pooling + reuse | **~5x fewer object operations** |
-| **Persistence** | Serialize entire world state | Incremental dirty-profile-only save | **5-20x less data per save** |
-| **Garbage Collection** | Scheduled loop over all dead entities | Event-driven queue + per-frame budget | **Eliminates GC frame spikes** |
-| **CQB Garrison** | Poll buildings near players | Event-driven on player grid change | **Only runs when player moves cells** |
+| **Data Access** | Custom parallel-array hash with `find` (linear scan) | Native HashMap (engine-level hash table) | **O(n) → O(1)** per lookup |
+| **Profile Proximity** | Iterate all profiles × all players every cycle | Spatial grid: each player queries only nearby cells | **O(n×m) → O(m×k)** where k = profiles in nearby cells |
+| **OPCOM Decision Cycle** | Full recalculation of all objectives every 30-120s | Dirty-flag: only re-evaluate objectives whose inputs changed | **O(n) → O(dirty)** per cycle |
+| **Spawn/Despawn** | Poll all profiles on timer, binary threshold | Event-driven on player grid-cell changes, hysteresis buffer | **Polling → event-driven**, eliminates threshold thrashing |
+| **Civilian System** | Create/destroy agents per activation | Object pooling + reuse | **Fewer createVehicle/deleteVehicle calls** |
+| **Persistence** | Serialize entire world state | Incremental: only save profiles whose data changed | **O(n) → O(dirty)** per save |
+| **Garbage Collection** | Scheduled loop iterates all dead entities | Event-driven queue, per-frame budget cap | **Bounded per-frame cost** instead of variable-length loop |
+| **CQB Garrison** | Poll buildings near all players each cycle | Trigger on player grid-cell change events | **Only fires when players move between cells** |
 
-### 9.2 Aggregate Server FPS Impact
+### 9.2 Projected Scaling (Requires Benchmarking)
 
-Typical ALiVE mission with ~300 virtual profiles, 20 players, 50 objectives:
+The table below illustrates *how* the algorithmic changes reduce work, using a hypothetical 300-profile / 20-player / 50-objective mission. **The operation counts are derived from algorithm complexity, not from measured timings.** ALiVE does not publish per-operation benchmarks, so we cannot assign millisecond costs to its systems.
 
-| Metric | ALiVE (estimated) | ATLAS.OS (projected) | How |
+| Metric | ALiVE (operations per cycle) | ATLAS.OS (operations per cycle) | Why fewer |
 |---|---|---|---|
-| **Hash lookups per cycle** | ~5,000 @ 0.0116ms = 58ms | ~5,000 @ 0.0018ms = **9ms** | Native HashMap O(1) vs parallel-array O(n) |
-| **Proximity distance checks** | 300×20 = 6,000 @ 0.005ms = 30ms | ~60 candidates @ 0.005ms = **0.3ms** | Grid pre-filters: only ~3 candidates per player instead of all 300 |
-| **OPCOM scoring** | 50 objectives × full eval = ~25ms | ~5 dirty objectives = **2.5ms** | Dirty-flag skips unchanged objectives |
-| **Total per-cycle overhead** | ~113ms+ | **~12ms** | |
-| **Effective frame budget recovered** | — | **~100ms per cycle** | |
+| **Proximity distance checks** | 300 × 20 = **6,000** | 20 players × ~3 nearby = **~60** | Spatial grid eliminates distant profiles from consideration |
+| **OPCOM objective evaluations** | All 50 objectives | Only objectives flagged dirty (varies) | Dirty-flag skip; typical steady-state: ~10-20% of objectives |
+| **Persistence data volume** | All 300 profiles serialized | Only changed profiles serialized | Dirty-tracking; typical: ~5-15% of profiles per save |
 
-**How the proximity numbers work**: ALiVE checks *every* profile against *every* player each cycle: 300 × 20 = 6,000 distance calculations. ATLAS.OS uses a spatial grid so each player only queries nearby cells, yielding ~3 candidate profiles per player on average: 20 × 3 = 60 distance calculations. The per-check cost (0.005ms) is identical — the savings come entirely from doing far fewer checks.
+**What this means in practice:** The improvements are in *how much unnecessary work is skipped*, not in making individual operations faster (a `distance` call costs the same either way). The real-world FPS impact depends on baseline server load, mission complexity, and mod interactions.
 
-**This translates to roughly 5-10 additional server FPS** in a heavily loaded mission, or the ability to support **2-3x more virtual profiles** at the same performance level.
+**Benchmarking plan:** Once core systems are implemented, we will profile using `diag_tickTime` measurements under controlled conditions (fixed player count, fixed profile count, standardized hardware) and publish actual numbers. Until then, these projections should be treated as architectural rationale, not performance guarantees.
 
 ### 9.3 Memory Improvements
 
@@ -1155,18 +1155,18 @@ if (isServer) then {
 
 | Dimension | ALiVE.OS | ATLAS.OS | Why It Matters |
 |---|---|---|---|
-| **Data structures** | Custom parallel-array hashes | Native HashMaps | 6.4x faster lookups, clean API |
-| **Spatial queries** | O(n×m) brute force | Grid-based spatial index | 67-333x fewer distance checks (see Section 5.3) |
+| **Data structures** | Custom parallel-array hashes | Native HashMaps | O(1) lookups vs linear scan, cleaner API |
+| **Spatial queries** | O(n×m) brute force | Grid-based spatial index | Dramatically fewer distance checks (see §5.3) |
 | **Execution model** | Mostly scheduled, polling | Mostly unscheduled, event-driven | Eliminates scheduler contention |
 | **Reactivity** | Poll every 10-120s | Instant event response | Sub-second reaction to battlefield changes |
-| **State management** | Monolithic save/load | Incremental dirty-flag persistence | 5-20x less serialization per save |
+| **State management** | Monolithic save/load | Incremental dirty-flag persistence | Only changed profiles serialized per save |
 | **Code quality** | Index-based access, fragile | Named key access, self-documenting | Dramatically easier to maintain/extend |
 | **Spawn management** | Fixed radius, thrashing | Hysteresis + event-driven | Eliminates spawn/despawn cycling |
-| **AI Commander** | Monolithic recalculation loop | CBA state machine + incremental scoring | 3-10x less computation per cycle |
+| **AI Commander** | Monolithic recalculation loop | CBA state machine + incremental scoring | Only dirty objectives re-evaluated per cycle |
 | **Object lifecycle** | Create/destroy constantly | Object pooling (civilians) | Reduces GC pressure, smoother FPS |
 | **Modularity** | Tightly coupled via globals | Event bus decoupling | Modules are independently testable |
 
-**Bottom line:** ATLAS.OS isn't an incremental improvement — it's a generational leap. The combination of native HashMaps, spatial indexing, event-driven architecture, and disciplined scheduling produces a system that can manage **2-3x more virtual entities at higher server FPS** than ALiVE, while being dramatically easier to maintain and extend.
+**Bottom line:** ATLAS.OS addresses the core architectural limitations of ALiVE — replacing linear scans with hash tables, brute-force proximity with spatial indexing, polling with events, and monolithic saves with incremental persistence. The expected result is significantly better scaling with large profile counts, though actual performance gains must be validated through benchmarking once the systems are implemented.
 
 ---
 
