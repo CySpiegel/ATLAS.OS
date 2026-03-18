@@ -45,6 +45,8 @@ jobs:
     if: ${{ !contains(github.ref_name, '-rc') && !contains(github.ref_name, '-alpha') && !contains(github.ref_name, '-beta') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup HEMTT
         uses: arma-actions/hemtt@v1
@@ -52,13 +54,46 @@ jobs:
       - name: Build release
         run: hemtt release
 
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | sed -n '2p')
+          TAG="${{ github.ref_name }}"
+
+          if [ -n "$PREV_TAG" ]; then
+            # Generate changelog from commit messages between tags
+            NOTES=$(git log "${PREV_TAG}..${TAG}" --pretty=format:"- %s" --no-merges)
+          else
+            # First release — use all commits
+            NOTES=$(git log --pretty=format:"- %s" --no-merges)
+          fi
+
+          # Also fetch the GitHub Release body (auto-generated release notes)
+          RELEASE_BODY=$(gh release view "$TAG" --json body -q '.body' 2>/dev/null || true)
+
+          if [ -n "$RELEASE_BODY" ]; then
+            CHANGELOG="$RELEASE_BODY"
+          else
+            CHANGELOG="$NOTES"
+          fi
+
+          # Write to output using delimiter for multiline support
+          {
+            echo "notes<<CHANGELOG_EOF"
+            echo "$CHANGELOG"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Upload to Steam Workshop
         uses: arma-actions/workshop-upload@v1
         with:
           appId: '107410'
           itemId: ${{ vars.STEAM_WORKSHOP_ID }}
           contentPath: .hemttout/release/@ATLAS_OS
-          changelog: "Release ${{ github.ref_name }} — see https://github.com/CySpiegel/ATLAS.OS/releases/tag/${{ github.ref_name }}"
+          changelog: ${{ steps.changelog.outputs.notes }}
         env:
           STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
           STEAM_PASSWORD: ${{ secrets.STEAM_PASSWORD }}
