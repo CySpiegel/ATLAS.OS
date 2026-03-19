@@ -1145,4 +1145,822 @@ Modules gate on CBA events, not polling:
 
 ---
 
-*This document is the blueprint for ATLAS.OS development. Implementation begins with `atlas_core` and `atlas_profile`, as all other modules depend on them.*
+## 17. Coding Standards — No God Objects
+
+### 17.1 Hard Rules
+
+These rules exist specifically to prevent ALiVE's god-object anti-patterns from recurring. They are non-negotiable.
+
+| Rule | Limit | ALiVE Violation Example |
+|------|-------|------------------------|
+| **Max lines per `.sqf` file** | **200 lines** (excluding comments/blank lines) | `fnc_OPCOM.sqf` = 4,500+ lines |
+| **Max function parameters** | **6** (use a HashMap for more) | ALiVE routinely passes 10+ positional params |
+| **No method-dispatch switches** | Zero `switch (_operation)` god-functions | Every major ALiVE module uses this pattern |
+| **One function, one file** | Every `fn_*.sqf` contains exactly one function | ALiVE nests helpers inside monolithic functions |
+| **No direct cross-module data access** | Modules communicate via events only | ALiVE's OPCOM directly reads profile internals |
+| **No global variables beyond registries** | Only `ATLAS_*Registry`, `ATLAS_spatialGrid`, `ATLAS_is*` flags | ALiVE has 200+ `ALIVE_*` globals |
+| **Function naming** | `ATLAS_fnc_<module>_<verb><Noun>` | Clear, discoverable, grep-friendly |
+
+### 17.2 Function Design Principles
+
+**Single Responsibility**: Each function does exactly one thing. If you can't describe what it does in one sentence without "and", split it.
+
+```sqf
+// BAD — does two things
+ATLAS_fnc_opcom_assessAndPlan = { /* scores objectives AND allocates forces */ };
+
+// GOOD — separate concerns
+ATLAS_fnc_opcom_scoreObjective = { /* scores one objective */ };
+ATLAS_fnc_opcom_allocateForces = { /* allocates forces based on scored objectives */ };
+```
+
+**Compose, Don't Nest**: Complex operations are pipelines of small functions, not nested logic.
+
+```sqf
+// BAD — monolithic
+ATLAS_fnc_opcom_assess = {
+    // 500 lines of inline force counting, threat assessment, terrain analysis...
+};
+
+// GOOD — composed pipeline
+ATLAS_fnc_opcom_assess = {
+    params ["_opcom"];
+    private _forces = [_opcom] call ATLAS_fnc_opcom_countForces;
+    private _threats = [_opcom] call ATLAS_fnc_opcom_assessThreats;
+    private _terrain = [_opcom] call ATLAS_fnc_opcom_assessTerrain;
+    private _supply = [_opcom] call ATLAS_fnc_opcom_assessSupply;
+    [_opcom, _forces, _threats, _terrain, _supply] call ATLAS_fnc_opcom_synthesizeAssessment;
+};
+```
+
+**Data In, Data Out**: Functions take parameters and return values. Avoid side effects where possible. When side effects are necessary (setting registry data, firing events), do them at the end.
+
+```sqf
+// BAD — hidden side effects throughout
+ATLAS_fnc_logistics_processRequest = {
+    // ... modifies globals mid-function, fires events in the middle ...
+};
+
+// GOOD — pure computation, then effects
+ATLAS_fnc_logistics_processRequest = {
+    params ["_request"];
+    // 1. Pure computation
+    private _route = [_request] call ATLAS_fnc_logistics_calculateRoute;
+    private _convoy = [_request, _route] call ATLAS_fnc_logistics_buildConvoy;
+    // 2. Effects at the end
+    ATLAS_logisticsRegistry set [_convoy get "id", _convoy];
+    ["atlas_logistics_convoyDispatched", [_convoy]] call CBA_fnc_localEvent;
+    _convoy
+};
+```
+
+### 17.3 File Organization Pattern
+
+Every module follows this exact structure:
+
+```
+atlas_<module>/
+  config.cpp              # CfgPatches, required addons
+  CfgEventHandlers.hpp    # XEH registration
+  CfgFunctions.hpp        # Function registration
+  XEH_preInit.sqf         # Registry creation, event handler registration
+  XEH_postInit.sqf        # Initialization gate (wait for dependencies)
+  XEH_postServerInit.sqf  # Server-only init (optional)
+  fnc/
+    fn_init.sqf           # Module initialization logic
+    fn_<verb><Noun>.sqf   # One function per file
+    ...
+```
+
+### 17.4 HashMap Contract Pattern
+
+Every data structure has a documented "contract" — a creation function that defines the shape:
+
+```sqf
+// fn_createProfile.sqf — this IS the schema documentation
+ATLAS_fnc_profile_create = {
+    params [
+        "_type",        // "infantry"|"motorized"|"mechanized"|"armor"|"air"|"naval"|"static"
+        "_unitClasses", // Array<classname>
+        "_side",        // side
+        "_faction",     // string
+        "_pos",         // [x,y,z]
+        ["_vehicleType", ""],     // classname or ""
+        ["_dir", 0]               // 0-360
+    ];
+
+    private _id = call ATLAS_fnc_profile_nextId;
+    private _profile = createHashMapFromArray [
+        ["id", _id],
+        ["type", _type],
+        // ... every field with its default value ...
+    ];
+
+    // Register
+    ATLAS_profileRegistry set [_id, _profile];
+    [_id, "profiles", _pos] call ATLAS_fnc_core_gridInsert;
+
+    // Event
+    ["atlas_profile_created", [_id, _profile]] call CBA_fnc_localEvent;
+
+    _profile
+};
+```
+
+An agent implementing any function that reads a profile can look at `fn_create.sqf` to know exactly what fields exist.
+
+---
+
+## 18. Detailed Module Internal Breakdowns
+
+Each section below specifies every function an implementing agent needs to write, with its signature, responsibility, and expected size.
+
+---
+
+### 18.1 `atlas_core` — Internal Structure
+
+```
+atlas_core/fnc/
+  fn_init.sqf                    # Initialize all registries, spatial grid, detect hosting model
+  fn_gridInsert.sqf              # Insert entity into spatial grid
+  fn_gridRemove.sqf              # Remove entity from spatial grid
+  fn_gridQuery.sqf               # Query entities near position by type
+  fn_gridMove.sqf                # Move entity between grid cells
+  fn_sectorAnalyze.sqf           # Analyze one sector cell (terrain, roads, buildings)
+  fn_sectorAnalyzeAll.sqf        # Scheduled: iterate all cells, call fn_sectorAnalyze each
+  fn_sectorGetTerrain.sqf        # Classify terrain type at position
+  fn_sectorGetBuildings.sqf      # Get building positions in a sector cell
+  fn_sectorGetRoads.sqf          # Get road segments in a sector cell
+  fn_clusterDetect.sqf           # Find clusters of buildings/objects on map
+  fn_clusterFindCenter.sqf       # Calculate center of a cluster
+  fn_objectiveCreate.sqf         # Create objective HashMap, register in registry + grid
+  fn_objectiveUpdate.sqf         # Update objective state, fire stateChanged event
+  fn_objectiveGetNearest.sqf     # Find nearest objective to a position
+  fn_objectiveGetByOwner.sqf     # Get all objectives owned by a side
+  fn_playerTrackCells.sqf        # PFH: detect player grid-cell changes, fire events
+  fn_hcRegister.sqf              # Handle HC registration event
+  fn_hcTransferGroup.sqf         # Transfer group to least-loaded HC
+  fn_hcShouldTransfer.sqf        # Check if group is eligible for HC transfer
+  fn_hcRebalance.sqf             # Rebalance groups across HCs
+  fn_hcUpdateLoad.sqf            # Recalculate unit counts per HC
+  fn_log.sqf                     # Structured logging: [ATLAS][MODULE] message
+  fn_moduleRegister.sqf          # Register a module in ATLAS_moduleRegistry
+  fn_markerCreate.sqf            # Create map marker with persistence tracking
+  fn_markerUpdate.sqf            # Update marker properties
+  fn_markerDelete.sqf            # Delete marker
+```
+
+**Function signatures:**
+
+```sqf
+// fn_gridInsert.sqf
+// Params: [entityId (string), entityType (string), pos (array)]
+// Returns: cell ([cx, cy])
+
+// fn_gridQuery.sqf
+// Params: [pos (array), radius (number), entityType (string, default "profiles")]
+// Returns: Array<entityId>
+
+// fn_gridMove.sqf
+// Params: [entityId (string), entityType (string), oldCell (array), newCell (array)]
+// Returns: nothing. Fires atlas_grid_cellUpdated.
+
+// fn_sectorAnalyze.sqf
+// Params: [cellKey (string), cellCenter ([x,y,z])]
+// Returns: sectorHashMap { terrain, elevation, roadCount, buildingCount, buildingPositions, dominantHeight, nearestRoad }
+
+// fn_objectiveCreate.sqf
+// Params: [pos, type ("strategic"|"tactical"|"civilian"), size, ownerSide]
+// Returns: objectiveHashMap (registered in ATLAS_objectiveRegistry)
+
+// fn_hcTransferGroup.sqf
+// Params: [group, profileId (string)]
+// Returns: boolean (true if transferred)
+
+// fn_playerTrackCells.sqf
+// This is a PFH (no params). Runs every 1 second.
+// For each player, checks if grid cell changed. Fires atlas_player_cellChanged.
+```
+
+---
+
+### 18.2 `atlas_profile` — Internal Structure
+
+```
+atlas_profile/fnc/
+  fn_init.sqf                    # Register event handlers, start virtual movement PFH
+  fn_create.sqf                  # Create profile HashMap, register in grid + registry
+  fn_destroy.sqf                 # Remove profile from registry + grid, fire destroyed event
+  fn_spawn.sqf                   # Materialize virtual profile into real Arma units
+  fn_despawn.sqf                 # Virtualize real units back to profile data
+  fn_syncFromSpawned.sqf         # Copy current unit state (pos, damage, ammo) back to profile
+  fn_moveTo.sqf                  # Set waypoints on a profile (virtual or spawned)
+  fn_virtualMove.sqf             # PFH/scheduled: advance virtual profiles along waypoints
+  fn_virtualMoveStep.sqf         # Move one profile one step along its route
+  fn_applyWaypoints.sqf          # Apply profile waypoints to a spawned group
+  fn_applyGroupBehavior.sqf      # Apply groupData (behaviour, speed, formation) to group
+  fn_getById.sqf                 # Lookup profile by ID (wrapper around registry get)
+  fn_getInArea.sqf               # Get profiles near position using spatial grid
+  fn_getBySide.sqf               # Get all profiles for a side (iterate registry)
+  fn_getByObjective.sqf          # Get profiles assigned to an objective
+  fn_serialize.sqf               # Convert profile HashMap to serializable array
+  fn_deserialize.sqf             # Restore profile HashMap from serialized array
+  fn_nextId.sqf                  # Generate next monotonic profile ID
+  fn_handleSpawnDespawn.sqf      # Event handler for player_cellChanged: evaluate spawn/despawn
+  fn_spawnGroup.sqf              # Create the actual group + units from classnames
+  fn_spawnVehicle.sqf            # Create vehicle and assign crew from profile
+  fn_calculateDamage.sqf         # Apply stored damage state to spawned units
+  fn_calculateAmmo.sqf           # Apply stored ammo level to spawned units
+```
+
+**Key function signatures:**
+
+```sqf
+// fn_create.sqf
+// Params: [type, unitClasses, side, faction, pos, vehicleType (default ""), dir (default 0)]
+// Returns: profile HashMap
+// Effects: registers in ATLAS_profileRegistry, inserts in grid, fires atlas_profile_created
+
+// fn_spawn.sqf
+// Params: [profileIdOrHashMap]
+// Returns: group
+// Effects: creates units, sets state to "spawned", calls fn_hcTransferGroup,
+//          fires atlas_profile_spawned
+
+// fn_despawn.sqf
+// Params: [profileIdOrHashMap]
+// Returns: nothing
+// Effects: calls fn_syncFromSpawned, deletes units, sets state to "virtual",
+//          fires atlas_profile_despawned
+
+// fn_syncFromSpawned.sqf
+// Params: [profile HashMap]
+// Returns: nothing
+// Effects: reads pos, damage, ammo, fuel, formation from spawned group back into HashMap
+
+// fn_handleSpawnDespawn.sqf
+// This is the atlas_player_cellChanged event handler.
+// Params: [player, newCell, oldCell]
+// Logic: query grid for profiles in spawn radius around player.
+//        Spawn virtual profiles within ATLAS_SPAWN_RADIUS.
+//        Despawn spawned profiles beyond ATLAS_DESPAWN_RADIUS of ALL players.
+
+// fn_virtualMoveStep.sqf
+// Params: [profile HashMap, deltaTime (seconds)]
+// Returns: boolean (true if waypoint reached)
+// Logic: move profile position toward next waypoint at speed appropriate for type.
+//        Update grid cell if changed. Fire atlas_profile_moved.
+```
+
+---
+
+### 18.3 `atlas_opcom` — Internal Structure
+
+This is the most complex module. ALiVE's OPCOM is a 140KB monolith. ATLAS breaks it into ~20 focused functions.
+
+```
+atlas_opcom/fnc/
+  fn_init.sqf                    # Create OPCOM instance, start state machine
+  fn_createInstance.sqf          # Build opcom HashMap with initial state
+  fn_createStateMachine.sqf      # Build CBA state machine with 4 phases
+
+  # === ASSESS PHASE (scheduled) ===
+  fn_assess.sqf                  # Orchestrate assessment — calls sub-functions
+  fn_countForces.sqf             # Count friendly forces by type (infantry, armor, etc.)
+  fn_assessThreats.sqf           # Estimate enemy force strength per objective
+  fn_assessSupply.sqf            # Calculate supply levels across controlled objectives
+  fn_assessTerrain.sqf           # Factor terrain advantage into assessment
+
+  # === PLAN PHASE (scheduled) ===
+  fn_plan.sqf                    # Orchestrate planning — score, prioritize, allocate
+  fn_scoreObjective.sqf          # Score ONE objective: military value × feasibility
+  fn_scoreMilitaryValue.sqf      # Sub-score: strategic importance (size, terrain, resources)
+  fn_scoreFeasibility.sqf        # Sub-score: distance, force ratio, supply access
+  fn_prioritizeObjectives.sqf    # Sort objectives by score, apply operational tempo filter
+  fn_allocateForces.sqf          # Assign profiles to objectives by capability match
+  fn_matchForceToObjective.sqf   # Score how well a profile fits an objective's needs
+
+  # === EXECUTE PHASE (unscheduled) ===
+  fn_execute.sqf                 # Issue orders for all pending allocations
+  fn_generateOrder.sqf           # Create order HashMap for a profile → objective assignment
+  fn_issueOrder.sqf              # Apply order to profile, fire atlas_opcom_orderIssued
+
+  # === MONITOR PHASE (unscheduled PFH) ===
+  fn_monitor.sqf                 # Check order completion/failure, trigger re-assessment
+  fn_checkOrderStatus.sqf        # Evaluate one order: complete? failed? stalled?
+  fn_handleOrderComplete.sqf     # Clean up completed order, update objective state
+  fn_handleOrderFailed.sqf       # Handle failure: retreat, reassign, request reinforcement
+
+  # === EVENT REACTIONS (unscheduled) ===
+  fn_handleCapture.sqf           # React to atlas_objective_stateChanged (capture)
+  fn_handleLoss.sqf              # React to objective lost — defensive posture shift
+  fn_handleProfileDestroyed.sqf  # React to atlas_profile_destroyed — update force estimates
+  fn_handleTheaterUpdate.sqf     # React to atlas_persist_theaterStateReceived
+
+  # === INSURGENCY MODE ===
+  fn_insurgencyInit.sqf          # Initialize insurgency-specific state
+  fn_insurgencyRecruit.sqf       # Cell recruitment logic (driven by civilian hostility)
+  fn_insurgencyPlot.sqf          # Plan insurgent operations (IED placement, ambushes)
+  fn_insurgencySelectTarget.sqf  # Pick targets for insurgent attacks
+```
+
+**OPCOM State Machine Definition:**
+
+```sqf
+// fn_createStateMachine.sqf
+ATLAS_fnc_opcom_createStateMachine = {
+    params ["_opcom"];
+
+    private _sm = [_opcom, true] call CBA_statemachine_fnc_create; // true = unscheduled transitions
+
+    // States
+    private _assess  = [_sm, {}, {}, ATLAS_fnc_opcom_assess,  "ASSESS"]  call CBA_statemachine_fnc_addState;
+    private _plan    = [_sm, {}, {}, ATLAS_fnc_opcom_plan,    "PLAN"]    call CBA_statemachine_fnc_addState;
+    private _execute = [_sm, {}, {}, ATLAS_fnc_opcom_execute, "EXECUTE"] call CBA_statemachine_fnc_addState;
+    private _monitor = [_sm, {}, {}, ATLAS_fnc_opcom_monitor, "MONITOR"] call CBA_statemachine_fnc_addState;
+
+    // Transitions: each phase completes by setting a flag
+    [_sm, _assess,  _plan,    { _this getVariable ["ATLAS_assessDone", false]  }] call CBA_statemachine_fnc_addTransition;
+    [_sm, _plan,    _execute, { _this getVariable ["ATLAS_planDone", false]    }] call CBA_statemachine_fnc_addTransition;
+    [_sm, _execute, _monitor, { _this getVariable ["ATLAS_executeDone", false] }] call CBA_statemachine_fnc_addTransition;
+    [_sm, _monitor, _assess,  { _this getVariable ["ATLAS_monitorDone", false] }] call CBA_statemachine_fnc_addTransition;
+
+    _opcom set ["stateMachine", _sm];
+    _sm
+};
+```
+
+**Scoring pipeline (how `fn_plan.sqf` works):**
+
+```sqf
+// fn_plan.sqf — orchestrator, not monolith
+ATLAS_fnc_opcom_plan = {
+    params ["_opcom"];
+
+    private _objectives = _opcom get "objectives";
+    private _dirtyOnly = true;
+
+    // 1. Score objectives (only dirty ones unless first cycle)
+    {
+        private _obj = ATLAS_objectiveRegistry get _x;
+        if (!_dirtyOnly || {_obj getOrDefault ["_dirty", true]}) then {
+            private _milValue = [_obj] call ATLAS_fnc_opcom_scoreMilitaryValue;
+            private _feasibility = [_obj, _opcom] call ATLAS_fnc_opcom_scoreFeasibility;
+            _obj set ["_score", _milValue * 0.6 + _feasibility * 0.4];
+            _obj set ["_dirty", false];
+        };
+    } forEach _objectives;
+
+    // 2. Prioritize
+    private _prioritized = [_opcom] call ATLAS_fnc_opcom_prioritizeObjectives;
+
+    // 3. Allocate forces to top-priority objectives
+    [_opcom, _prioritized] call ATLAS_fnc_opcom_allocateForces;
+
+    _opcom setVariable ["ATLAS_planDone", true];
+};
+```
+
+---
+
+### 18.4 `atlas_logistics` — Internal Structure
+
+```
+atlas_logistics/fnc/
+  fn_init.sqf                    # Register event handlers, initialize registries
+  fn_createRequest.sqf           # Build logistics request HashMap
+  fn_processRequest.sqf          # Evaluate request, decide fulfillment method
+  fn_findSupplySource.sqf        # Find nearest depot/base that can fulfill request
+  fn_calculateRoute.sqf          # Pathfind along road network from source to destination
+  fn_buildConvoy.sqf             # Create convoy profiles (trucks, escort) for a request
+  fn_dispatchConvoy.sqf          # Register convoy, assign waypoints, fire event
+  fn_monitorConvoys.sqf          # PFH: check convoy arrival/destruction
+  fn_checkConvoyArrival.sqf      # Has convoy reached destination?
+  fn_deliverSupplies.sqf         # Apply supplies to destination: ammo, fuel, reinforcements
+  fn_destroyConvoy.sqf           # Handle convoy loss: clean up, notify OPCOM
+  fn_playerRequest.sqf           # Handle player resupply request from atlas_c2
+  fn_reinforcementPoolRead.sqf   # Read available reinforcements (local or PostgreSQL)
+  fn_reinforcementPoolDeduct.sqf # Deduct from pool (atomic on PostgreSQL)
+  fn_assessAmmoLevel.sqf         # Calculate aggregate ammo level for profiles at objective
+  fn_assessFuelLevel.sqf         # Calculate aggregate fuel level for profiles at objective
+  fn_handleOpcomOrder.sqf        # Event handler: check if ordered forces need resupply first
+  fn_handleProfileDestroyed.sqf  # Event handler: was destroyed profile a convoy?
+  fn_supplyDepotCreate.sqf       # Register a supply depot (position + capacity)
+  fn_supplyDepotGetNearest.sqf   # Find nearest depot to a position
+```
+
+**Function signatures:**
+
+```sqf
+// fn_calculateRoute.sqf
+// Params: [startPos ([x,y,z]), endPos ([x,y,z])]
+// Returns: Array<[x,y,z]> — waypoints along road network
+// Uses: nearRoads, road segments. Falls back to direct route if no roads.
+
+// fn_buildConvoy.sqf
+// Params: [request HashMap, route Array, sourceDepot HashMap]
+// Returns: convoy HashMap
+// Logic: create 1-3 truck profiles + 0-1 escort profiles via atlas_profile fn_create
+
+// fn_deliverSupplies.sqf
+// Params: [convoy HashMap, destinationObjective HashMap]
+// Returns: nothing
+// Effects: increase ammo/fuel on profiles at destination, add reinforcement profiles,
+//          fire atlas_logistics_delivered
+
+// fn_reinforcementPoolDeduct.sqf
+// Params: [faction (string), forceType (string), count (number)]
+// Returns: boolean (true if pool had enough)
+// Effects: if PostgreSQL connected, uses atomic REINFORCEMENTS_DEDUCT.
+//          Otherwise uses local ATLAS_reinforcementPool HashMap.
+```
+
+---
+
+### 18.5 `atlas_air` — Internal Structure
+
+```
+atlas_air/fnc/
+  fn_init.sqf                    # Register handlers, initialize ATO queue
+  fn_queueMission.sqf            # Add mission to ATO queue with priority
+  fn_processQueue.sqf            # PFH: assign aircraft to highest-priority queued mission
+  fn_findAvailableAircraft.sqf   # Query profiles for available aircraft by type
+  fn_assignAircraft.sqf          # Assign aircraft profile to mission, update status
+  fn_monitorMissions.sqf         # PFH: check active mission status
+  fn_casExecute.sqf              # CAS behavior: fly to target, engage, RTB
+  fn_casSetupAttackRun.sqf       # Calculate attack vector for CAS run
+  fn_capExecute.sqf              # CAP behavior: orbit area, engage threats
+  fn_capSetupOrbit.sqf           # Calculate orbit parameters (center, radius, altitude)
+  fn_seadExecute.sqf             # SEAD behavior: target air defenses
+  fn_transportExecute.sqf        # Transport: fly to pickup, load, fly to dropoff, unload
+  fn_transportPickup.sqf         # Handle troop loading at pickup zone
+  fn_transportDropoff.sqf        # Handle troop unloading at dropoff zone
+  fn_missionComplete.sqf         # Clean up completed mission, return aircraft to pool
+  fn_missionFailed.sqf           # Handle aircraft loss during mission
+  fn_handlePlayerCAS.sqf         # Event handler: player CAS request from atlas_c2
+  fn_handlePlayerTransport.sqf   # Event handler: player transport request
+  fn_handleOpcomRequest.sqf      # Event handler: OPCOM air support request
+  fn_rtb.sqf                     # Return to base behavior for aircraft
+```
+
+---
+
+### 18.6 `atlas_civilian` — Internal Structure
+
+ALiVE splits civilians across 4 modules with 20+ behavior functions. ATLAS consolidates but keeps behaviors as separate composable functions.
+
+```
+atlas_civilian/fnc/
+  fn_init.sqf                    # Compute density, register handlers, start PFHs
+  fn_computeDensity.sqf          # Scheduled: calculate population density per grid cell
+
+  # === AGENT POOL ===
+  fn_poolGet.sqf                 # Get agent from pool (or create new if empty)
+  fn_poolReturn.sqf              # Return agent to pool (disable sim, move to [0,0,0])
+  fn_poolPrewarm.sqf             # Pre-create N agents at startup
+
+  # === SPAWN/DESPAWN ===
+  fn_spawnForCell.sqf            # Spawn civilians in a grid cell (called on player proximity)
+  fn_despawnForCell.sqf          # Return all agents in a cell to pool
+  fn_handlePlayerCell.sqf        # Event handler: atlas_player_cellChanged → spawn/despawn
+
+  # === BEHAVIOR STATE MACHINE ===
+  fn_behaviorInit.sqf            # Create CBA state machine for one civilian
+  fn_behaviorIdle.sqf            # Idle: stand/sit at position, occasionally look around
+  fn_behaviorWalk.sqf            # Walk to random nearby position
+  fn_behaviorDrive.sqf           # Drive vehicle along road
+  fn_behaviorFlee.sqf            # Flee from threat (gunfire, explosion, military)
+  fn_behaviorCower.sqf           # Cower in place (under direct threat)
+  fn_behaviorGather.sqf          # Gather with other civilians (market, meeting)
+  fn_behaviorTransition.sqf      # Evaluate conditions and pick next behavior
+
+  # === HOSTILITY ===
+  fn_hostilityUpdate.sqf         # Adjust hostility for a cell based on events
+  fn_hostilityGet.sqf            # Get hostility level toward a faction in a cell
+  fn_hostilityApplyEvent.sqf     # Process specific event (civilian killed, IED, etc.)
+
+  # === INTERACTION ===
+  fn_interactInit.sqf            # Add ACE/action menu interactions to spawned civilians
+  fn_interactQuestion.sqf        # Player questions civilian — roll for intel
+  fn_interactDetain.sqf          # Player detains civilian
+  fn_interactSearch.sqf          # Player searches civilian for intel/weapons
+  fn_interactRelease.sqf         # Release detained civilian
+
+  # === TRAFFIC ===
+  fn_trafficSpawn.sqf            # Spawn civilian vehicle on road
+  fn_trafficRoute.sqf            # Generate random A-to-B road route
+  fn_trafficDespawn.sqf          # Return vehicle + driver to pool
+```
+
+**Behavior state machine:**
+
+```sqf
+// fn_behaviorInit.sqf — creates per-agent CBA state machine
+ATLAS_fnc_civ_behaviorInit = {
+    params ["_agent"];
+
+    private _sm = [_agent, false] call CBA_statemachine_fnc_create;
+
+    private _idle   = [_sm, {}, {}, ATLAS_fnc_civ_behaviorIdle,   "idle"]   call CBA_statemachine_fnc_addState;
+    private _walk   = [_sm, {}, {}, ATLAS_fnc_civ_behaviorWalk,   "walk"]   call CBA_statemachine_fnc_addState;
+    private _drive  = [_sm, {}, {}, ATLAS_fnc_civ_behaviorDrive,  "drive"]  call CBA_statemachine_fnc_addState;
+    private _flee   = [_sm, {}, {}, ATLAS_fnc_civ_behaviorFlee,   "flee"]   call CBA_statemachine_fnc_addState;
+    private _cower  = [_sm, {}, {}, ATLAS_fnc_civ_behaviorCower,  "cower"]  call CBA_statemachine_fnc_addState;
+    private _gather = [_sm, {}, {}, ATLAS_fnc_civ_behaviorGather, "gather"] call CBA_statemachine_fnc_addState;
+
+    // Transitions — any state can flee on threat
+    {
+        [_sm, _x, _flee, {
+            _this getVariable ["ATLAS_civ_threatNear", false]
+        }] call CBA_statemachine_fnc_addTransition;
+    } forEach [_idle, _walk, _drive, _gather];
+
+    // Flee → cower if threat is very close
+    [_sm, _flee, _cower, {
+        _this getVariable ["ATLAS_civ_threatDist", 999] < 30
+    }] call CBA_statemachine_fnc_addTransition;
+
+    // Cower/flee → idle when threat passes
+    {
+        [_sm, _x, _idle, {
+            !(_this getVariable ["ATLAS_civ_threatNear", false])
+        }] call CBA_statemachine_fnc_addTransition;
+    } forEach [_flee, _cower];
+
+    // Idle → walk/drive/gather (random selection via fn_behaviorTransition)
+    [_sm, _idle, _walk, {
+        _this getVariable ["ATLAS_civ_nextBehavior", ""] == "walk"
+    }] call CBA_statemachine_fnc_addTransition;
+
+    _sm
+};
+```
+
+---
+
+### 18.7 `atlas_asymmetric` — Internal Structure
+
+```
+atlas_asymmetric/fnc/
+  fn_init.sqf                    # Initialize cell registry, register handlers
+
+  # === IED MANAGEMENT ===
+  fn_iedCreate.sqf               # Create IED HashMap, register in grid
+  fn_iedPlace.sqf                # Physically place IED object at position
+  fn_iedArm.sqf                  # Arm IED (make it active/dangerous)
+  fn_iedDetonate.sqf             # Trigger IED explosion, calculate casualties
+  fn_iedDisarm.sqf               # Player disarms IED
+  fn_iedDetect.sqf               # Detection check (player skill, equipment, proximity)
+  fn_iedSelectPosition.sqf       # Pick IED placement: road intersections, chokepoints
+  fn_iedHandleProximity.sqf      # Event handler: player near IED → detonation check
+
+  # === VBIED / SUICIDE BOMBER ===
+  fn_vbiedCreate.sqf             # Create vehicle-borne IED profile
+  fn_vbiedDispatch.sqf           # Send VBIED toward target
+  fn_bomberCreate.sqf            # Create suicide bomber agent
+  fn_bomberDispatch.sqf          # Send bomber toward target area
+
+  # === INSURGENT CELLS ===
+  fn_cellCreate.sqf              # Create insurgent cell HashMap
+  fn_cellRecruit.sqf             # Increase cell strength based on hostility
+  fn_cellAttrition.sqf           # Decrease cell strength from losses
+  fn_cellDiscoveryCheck.sqf      # Check if accumulated intel reveals a cell
+  fn_cellGetActive.sqf           # Get cells with enough strength to operate
+  fn_cellSelectOperation.sqf     # Pick operation type for a cell (IED, ambush, VBIED)
+
+  # === INTEL SYSTEM ===
+  fn_intelProcess.sqf            # Process intel from various sources
+  fn_intelFromQuestioning.sqf    # Intel gained from civilian questioning
+  fn_intelFromPatrol.sqf         # Intel gained from patrol near cell
+  fn_intelFromSIGINT.sqf         # Intel from electronic/signals intelligence
+  fn_intelAccumulate.sqf         # Add intel points toward cell discovery
+  fn_intelCreateReport.sqf       # Generate intel report for atlas_c2
+
+  # === EVENT HANDLERS ===
+  fn_handleHostilityChanged.sqf  # Civilian hostility change → adjust recruitment
+  fn_handleProfileDestroyed.sqf  # Insurgent killed → weaken cell
+  fn_handleOpcomOrder.sqf        # OPCOM in insurgency mode requests IED/ambush
+```
+
+---
+
+### 18.8 `atlas_persist` — Internal Structure
+
+```
+atlas_persist/fnc/
+  fn_init.sqf                    # Check for saves, init extension if available
+
+  # === LOCAL (PNS) ===
+  fn_pnsSave.sqf                 # Save one registry to profileNamespace
+  fn_pnsLoad.sqf                 # Load one registry from profileNamespace
+  fn_pnsSaveAll.sqf              # Orchestrate: save profiles, objectives, convoys, etc.
+  fn_pnsLoadAll.sqf              # Orchestrate: load all registries from PNS
+  fn_pnsClear.sqf                # Wipe saved data (admin action)
+
+  # === SERIALIZATION ===
+  fn_serialize.sqf               # Convert HashMap to serializable array
+  fn_serializeRegistry.sqf       # Serialize entire registry (HashMap of HashMaps)
+  fn_deserialize.sqf             # Convert array back to HashMap
+  fn_deserializeRegistry.sqf     # Rebuild registry from serialized data
+
+  # === EXTENSION (PostgreSQL) ===
+  fn_extensionInit.sqf           # Initialize DLL, pass connection string, start heartbeat
+  fn_extensionCall.sqf           # Synchronous callExtension wrapper with error handling
+  fn_extensionCallAsync.sqf      # Async callExtension with callback registration
+  fn_extensionHandleCallback.sqf # Process extension callback results
+
+  # === THEATER STATE (cross-server) ===
+  fn_theaterRead.sqf             # Read theater state from PostgreSQL
+  fn_theaterWrite.sqf            # Write this server's theater data to PostgreSQL
+  fn_theaterPoll.sqf             # PFH: poll for cross-server events
+  fn_theaterProcessEvent.sqf     # Handle one cross-server event (dispatch to local CBA events)
+  fn_theaterPublishEvent.sqf     # Push event to cross-server queue
+
+  # === OBJECTIVES (cross-server) ===
+  fn_objectivesSync.sqf          # Sync objective states to/from PostgreSQL
+
+  # === PLAYER STATE ===
+  fn_playerLoad.sqf              # Load player state (gear, pos, medical) on connect
+  fn_playerSave.sqf              # Save player state on disconnect
+  fn_playerAutoSave.sqf          # PFH: periodic player state backup
+
+  # === WEATHER ===
+  fn_weatherSave.sqf             # Save current weather state
+  fn_weatherLoad.sqf             # Restore weather on mission load
+
+  # === SAVE LIFECYCLE ===
+  fn_saveAll.sqf                 # Master save: PNS + PostgreSQL, fires events
+  fn_loadAll.sqf                 # Master load: PNS + PostgreSQL, fires events
+  fn_autosaveStart.sqf           # Start periodic autosave PFH
+  fn_isDirty.sqf                 # Check if any registry has dirty entries
+```
+
+**Incremental save pattern:**
+
+```sqf
+// fn_pnsSave.sqf — only save dirty entries
+ATLAS_fnc_persist_pnsSave = {
+    params ["_registryName", "_registry"];
+    private _dirtyCount = 0;
+
+    {
+        private _entity = _y;
+        if (_entity getOrDefault ["_dirty", false]) then {
+            private _serialized = [_entity] call ATLAS_fnc_persist_serialize;
+            profileNamespace setVariable [format ["ATLAS_%1_%2", _registryName, _x], _serialized];
+            _entity set ["_dirty", false];
+            _dirtyCount = _dirtyCount + 1;
+        };
+    } forEach _registry;
+
+    _dirtyCount
+};
+```
+
+---
+
+### 18.9 `atlas_c2` — Internal Structure
+
+ALiVE's C2ISTAR is 157KB. ATLAS splits it into UI lifecycle, task management, and reporting.
+
+```
+atlas_c2/fnc/
+  fn_init.sqf                    # Register client-side event handlers
+
+  # === TABLET UI ===
+  fn_tabletOpen.sqf              # Open tablet dialog, populate initial data
+  fn_tabletClose.sqf             # Close tablet, clean up UI state
+  fn_tabletRefresh.sqf           # Refresh all tablet panels with current data
+  fn_tabletMapDraw.sqf           # Draw objectives, forces, routes on map control
+  fn_tabletMapDrawObjectives.sqf # Draw objective markers on map
+  fn_tabletMapDrawForces.sqf     # Draw friendly/enemy force indicators
+  fn_tabletMapDrawConvoys.sqf    # Draw active convoy routes
+  fn_tabletMapDrawAir.sqf        # Draw air mission indicators
+  fn_tabletMapDrawIntel.sqf      # Draw intel/asymmetric markers
+  fn_tabletPanelForces.sqf       # Populate forces overview panel
+  fn_tabletPanelTasks.sqf        # Populate task list panel
+  fn_tabletPanelReports.sqf      # Populate reports panel
+  fn_tabletPanelSupport.sqf      # Populate support request panel
+
+  # === TASK MANAGEMENT ===
+  fn_taskCreate.sqf              # Create task HashMap, assign to players, fire event
+  fn_taskUpdate.sqf              # Update task state (succeeded, failed, canceled)
+  fn_taskComplete.sqf            # Mark task complete, notify players
+  fn_taskGetActive.sqf           # Get all active tasks for a side/player
+  fn_taskSync.sqf                # JIP: sync existing tasks to new player
+
+  # === REPORTS ===
+  fn_reportSpotrep.sqf           # Generate SPOTREP from template
+  fn_reportSitrep.sqf            # Generate SITREP from template
+  fn_reportPatrolrep.sqf         # Generate PATROLREP from template
+  fn_reportSubmit.sqf            # Submit report, create diary entry, fire event
+  fn_reportGetAll.sqf            # Get all reports for display
+
+  # === SUPPORT REQUESTS (UI → event bridge) ===
+  fn_requestCAS.sqf              # Player selects target → fires atlas_c2_casRequested
+  fn_requestTransport.sqf        # Player selects pickup/dropoff → fires event
+  fn_requestResupply.sqf         # Player selects type → fires event
+  fn_requestArtillery.sqf        # Player selects target → fires atlas_support_fireMission
+
+  # === EVENT HANDLERS (data → UI updates) ===
+  fn_handleObjectiveUpdate.sqf   # Refresh map when objective changes
+  fn_handleForceUpdate.sqf       # Refresh forces when profiles spawn/die
+  fn_handleLogisticsUpdate.sqf   # Refresh convoy display
+  fn_handleAirUpdate.sqf         # Refresh air mission display
+```
+
+---
+
+### 18.10 `atlas_support` — Internal Structure
+
+```
+atlas_support/fnc/
+  fn_init.sqf                    # Register handlers, initialize battery/insertion registries
+
+  # === ARTILLERY ===
+  fn_batteryRegister.sqf         # Register an artillery battery (position, type, ammo count)
+  fn_batteryGetNearest.sqf       # Find nearest available battery for a target position
+  fn_fireMission.sqf             # Execute fire mission: calculate, delay, spawn rounds
+  fn_fireMissionCalculate.sqf    # Calculate time-of-flight, dispersion for battery → target
+  fn_fireMissionExecute.sqf      # Spawn artillery rounds with appropriate delay
+  fn_fireMissionComplete.sqf     # Clean up, update ammo count, fire event
+
+  # === INSERTION POINTS ===
+  fn_insertionCreate.sqf         # Create insertion point (respawn, teleport, HALO)
+  fn_insertionRemove.sqf         # Remove insertion point
+  fn_insertionGetAvailable.sqf   # Get available insertion points for a side
+  fn_insertionUse.sqf            # Player uses insertion point — teleport/HALO logic
+  fn_insertionHALO.sqf           # HALO insertion: altitude, opening height, drift
+
+  # === GROUP MANAGEMENT ===
+  fn_groupGetComposition.sqf     # Get unit composition for a group
+  fn_groupDisplayUI.sqf          # Show group management interface
+```
+
+---
+
+### 18.11 `atlas_cqb` — Internal Structure
+
+```
+atlas_cqb/fnc/
+  fn_init.sqf                    # Register handlers, start building scan
+  fn_scanBuildings.sqf           # Scheduled: scan all buildings, cache positions per cell
+  fn_scanBuildingPositions.sqf   # Get enterable positions for one building
+  fn_cacheGet.sqf                # Get cached buildings for a grid cell
+  fn_handlePlayerCell.sqf        # Event handler: player_cellChanged → evaluate garrisons
+  fn_evaluateBuildings.sqf       # Decide which buildings in range should be garrisoned
+  fn_spawnGarrison.sqf           # Spawn garrison in a building (create profile, place units)
+  fn_despawnGarrison.sqf         # Remove garrison when all players leave area
+  fn_assignPositions.sqf         # Assign units to specific building positions
+  fn_getGarrisonSize.sqf         # Calculate appropriate garrison size for building
+  fn_handleProfileDestroyed.sqf  # Garrison wiped out — update building state
+  fn_handleObjectiveChanged.sqf  # Ownership changed — regarrison for new owner
+```
+
+---
+
+### 18.12 Utility Modules — Internal Structure
+
+**`atlas_gc`:**
+```
+fn_init.sqf                      # Register atlas_profile_destroyed handler, start PFH
+fn_enqueue.sqf                   # Add dead units to GC queue with timestamp
+fn_processQueue.sqf              # PFH: delete up to 3 corpse groups per frame
+fn_cleanupObjects.sqf            # Delete vehicle wrecks, weapon holders in area
+```
+
+**`atlas_ai`:**
+```
+fn_init.sqf                      # Register CBA settings, subscribe to profile_spawned
+fn_settingsInit.sqf              # Define CBA settings (skill, accuracy, etc.)
+fn_applySkill.sqf                # Apply AI skill settings to a newly spawned group
+fn_calculateSkill.sqf            # Determine skill level based on faction, difficulty setting
+```
+
+**`atlas_stats`:**
+```
+fn_init.sqf                      # Subscribe to combat events
+fn_recordKill.sqf                # Record unit kill (player or AI)
+fn_recordObjective.sqf           # Record objective capture/loss
+fn_recordShot.sqf                # Record shots fired (player only)
+fn_aggregate.sqf                 # Aggregate stats for save/display
+fn_serialize.sqf                 # Serialize stats for persistence
+fn_display.sqf                   # Show stats UI to player
+```
+
+**`atlas_admin`:**
+```
+fn_init.sqf                      # Register admin actions
+fn_debugMenu.sqf                 # Show debug menu (CBA settings or custom dialog)
+fn_teleport.sqf                  # Teleport to position/objective
+fn_forceSpawn.sqf                # Force-spawn all profiles in area (debug)
+fn_forceSave.sqf                 # Trigger immediate save
+fn_forceLoad.sqf                 # Trigger reload from persistence
+fn_markProfiles.sqf              # Toggle debug markers showing all virtual profiles
+fn_markObjectives.sqf            # Toggle debug markers for objectives
+fn_hcStatus.sqf                  # Show HC load distribution status
+```
+
+---
+
+*This document is the blueprint for ATLAS.OS development. Every function listed above should be implementable by an agent reading only this document and the functions it depends on. Implementation begins with `atlas_core` and `atlas_profile`, as all other modules depend on them.*
