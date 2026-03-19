@@ -1200,6 +1200,578 @@ Marker naming convention:
 
 Zone markers are standard Arma 3 area markers. Their size defines the operational area. Their color is ignored (side is determined by name). No sync lines needed.
 
+**Standard+ (editor-placed modules for bases and objectives):**
+
+For mission makers who want precise control over base locations, objectives, and operational areas, ATLAS provides **editor-placeable logic modules** — lightweight objects placed on the map that configure specific features at their position. Unlike ALiVE, these do NOT require sync lines. Each module is self-contained.
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                   ATLAS Editor Modules                          │
+│                                                                  │
+│  Place on map → configure via attributes → done. No sync lines. │
+├────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ATLAS Game Master          (one per mission, optional)          │
+│    Global config: factions, preset, force scale, theater name    │
+│                                                                  │
+│  ATLAS Base - MOB           (Main Operating Base)                │
+│    Attributes: side, name, garrison size, supply levels          │
+│    The top of the supply chain. Usually 1 per side.              │
+│                                                                  │
+│  ATLAS Base - FOB           (Forward Operating Base)             │
+│    Attributes: side, name, parent base (dropdown of MOBs),       │
+│    garrison size, initial supply levels, auto-resupply (yes/no)  │
+│                                                                  │
+│  ATLAS Base - COP           (Combat Outpost)                     │
+│    Attributes: side, name, parent base (dropdown of FOBs/MOBs),  │
+│    garrison size, initial supply levels                           │
+│                                                                  │
+│  ATLAS Base - PB            (Patrol Base)                        │
+│    Attributes: side, name, parent base (dropdown), garrison size │
+│                                                                  │
+│  ATLAS Base - OP            (Observation Post)                   │
+│    Attributes: side, name, parent base (dropdown), garrison size │
+│                                                                  │
+│  ATLAS Objective            (Strategic/Tactical objective)        │
+│    Attributes: name, type (strategic/tactical/civilian),          │
+│    initial owner, priority (low/medium/high/critical),            │
+│    size radius                                                    │
+│                                                                  │
+│  ATLAS Military Placement   (Force spawning zone)                │
+│    Attributes: side, faction, force composition overrides,        │
+│    placement radius, force scale multiplier                       │
+│    Place at location where you want initial forces to appear.     │
+│                                                                  │
+│  ATLAS CQB Zone             (Building garrison area)             │
+│    Attributes: side, garrison density (light/medium/heavy),       │
+│    radius, faction override                                       │
+│    Overrides default CQB settings for this area.                  │
+│                                                                  │
+│  ATLAS Civilian Zone        (Civilian density override)           │
+│    Attributes: density multiplier (0-3.0), enable traffic,        │
+│    enable interactions, initial hostility                          │
+│                                                                  │
+│  ATLAS Exclusion Zone       (No ATLAS activity)                   │
+│    Attributes: radius                                              │
+│    No profiles, no civilians, no CQB, no IEDs in this area.       │
+│                                                                  │
+│  ATLAS Supply Depot         (Logistics source point)              │
+│    Attributes: side, capacity, initial stock levels,               │
+│    resource types available                                        │
+│    Not a full base — just a supply point (ammo dump, fuel depot).  │
+│                                                                  │
+│  ATLAS IED Zone             (Asymmetric threat area)              │
+│    Attributes: density (low/medium/high), types allowed            │
+│    (IED/VBIED/suicide), radius                                     │
+│    Overrides default asymmetric settings for this area.            │
+│                                                                  │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Key design rules for editor modules:**
+- **No sync lines.** Ever. Modules discover each other by position and attributes.
+- **Parent base resolution**: Base modules specify their parent by name dropdown (populated from placed MOBs/FOBs). The supply chain tree is built automatically from these parent references.
+- **Placement order doesn't matter.** All modules are collected and processed during `atlas_core` init. Place them in any order.
+- **Modules are optional.** If no base modules are placed, OPCOM auto-generates bases at objectives. If no objective modules are placed, auto-detection finds them. Modules override auto-detection, they don't replace the whole system.
+- **Editor attributes use Arma 3's standard module attribute UI** — dropdowns, sliders, text fields. No custom dialogs needed.
+
+**How modules are discovered at init:**
+
+```sqf
+// In atlas_core fn_init.sqf — scan for all placed ATLAS modules
+ATLAS_fnc_core_collectEditorModules = {
+    private _modules = createHashMap;
+
+    // Find all ATLAS module objects by config class
+    {
+        private _type = typeOf _x;
+        if (_type find "ATLAS_Module_" == 0) then {
+            private _category = _x getVariable ["ATLAS_moduleType", "unknown"];
+            private _list = _modules getOrDefault [_category, []];
+            _list pushBack _x;
+            _modules set [_category, _list];
+        };
+    } forEach (allMissionObjects "Logic");
+
+    // Process in order: Game Master → Bases (MOB first) → Objectives → Zones
+    if ("gameMaster" in keys _modules) then {
+        { [_x] call ATLAS_fnc_core_processGameMaster } forEach (_modules get "gameMaster");
+    };
+
+    // Process bases in hierarchy order: MOB → FOB → COP → PB → OP
+    {
+        private _baseType = _x;
+        if (_baseType in keys _modules) then {
+            { [_x, _baseType] call ATLAS_fnc_core_processBaseModule } forEach (_modules get _baseType);
+        };
+    } forEach ["MOB", "FOB", "COP", "PB", "OP"];
+
+    // Process objectives, zones, depots
+    { if (_x in keys _modules) then {
+        { [_x, _y] call ATLAS_fnc_core_processZoneModule } forEach (_modules get _x);
+    }} forEach ["objective", "placement", "cqb", "civilian", "exclusion", "supplyDepot", "ied"];
+};
+```
+
+**CfgVehicles definition** (in atlas_core config.cpp):
+
+```cpp
+class CfgVehicles {
+    class Logic;
+    class Module_F: Logic {
+        class AttributesBase;
+        class ModuleDescription;
+    };
+
+    // === ATLAS Game Master ===
+    class ATLAS_Module_GameMaster: Module_F {
+        scope = 2;
+        displayName = "ATLAS - Game Master";
+        category = "ATLAS";
+        function = "ATLAS_fnc_core_moduleGameMaster";
+        isGlobal = 1;
+        isTriggerActivated = 0;
+
+        class Attributes: AttributesBase {
+            class ATLAS_bluforFaction {
+                displayName = "BLUFOR Faction";
+                tooltip = "Faction classname for BLUFOR forces";
+                typeName = "STRING";
+                defaultValue = """BLU_F""";
+            };
+            class ATLAS_opforFaction {
+                displayName = "OPFOR Faction";
+                tooltip = "Faction classname for OPFOR forces";
+                typeName = "STRING";
+                defaultValue = """OPF_F""";
+            };
+            class ATLAS_preset {
+                displayName = "Scenario Preset";
+                tooltip = "Pre-configured scenario type";
+                typeName = "NUMBER";
+                class values {
+                    class conventional { name = "Conventional War"; value = 0; };
+                    class insurgency   { name = "Insurgency";       value = 1; };
+                    class occupation   { name = "Occupation";        value = 2; };
+                    class custom       { name = "Custom";            value = 3; };
+                };
+                defaultValue = 0;
+            };
+            class ATLAS_forceScale {
+                displayName = "Force Scale";
+                tooltip = "Multiplier for number of AI units (0.25 = light, 1.0 = normal, 2.0 = heavy)";
+                typeName = "NUMBER";
+                defaultValue = 1.0;
+            };
+            class ATLAS_autoDetect {
+                displayName = "Auto-detect Objectives";
+                tooltip = "Automatically find objectives from map features";
+                typeName = "NUMBER";
+                class values {
+                    class off     { name = "Off (manual only)";    value = 0; };
+                    class confirm { name = "Suggest + Confirm";    value = 1; default = 1; };
+                    class auto    { name = "Full Auto";            value = 2; };
+                };
+                defaultValue = 1;
+            };
+            class ATLAS_theaterName {
+                displayName = "Theater Name";
+                tooltip = "Identifier for cross-server campaigns";
+                typeName = "STRING";
+                defaultValue = """Default Theater""";
+            };
+        };
+    };
+
+    // === ATLAS Base Modules ===
+    class ATLAS_Module_Base_MOB: Module_F {
+        scope = 2;
+        displayName = "ATLAS - Base (MOB)";
+        category = "ATLAS_Bases";
+        function = "ATLAS_fnc_core_moduleBase";
+        isGlobal = 1;
+        isTriggerActivated = 0;
+        icon = "\atlas_core\data\icon_mob.paa";
+
+        class Attributes: AttributesBase {
+            class ATLAS_side {
+                displayName = "Side";
+                typeName = "NUMBER";
+                class values {
+                    class west       { name = "BLUFOR"; value = 1; default = 1; };
+                    class east       { name = "OPFOR";  value = 0; };
+                    class resistance { name = "INDFOR"; value = 2; };
+                };
+            };
+            class ATLAS_baseName {
+                displayName = "Base Name";
+                typeName = "STRING";
+                defaultValue = """Main Base""";
+            };
+            class ATLAS_garrisonSize {
+                displayName = "Garrison Size";
+                tooltip = "Number of AI units garrisoning this base";
+                typeName = "NUMBER";
+                defaultValue = 100;
+            };
+        };
+    };
+
+    class ATLAS_Module_Base_FOB: ATLAS_Module_Base_MOB {
+        displayName = "ATLAS - Base (FOB)";
+        icon = "\atlas_core\data\icon_fob.paa";
+        class Attributes: AttributesBase {
+            class ATLAS_side: ATLAS_side {};
+            class ATLAS_baseName: ATLAS_baseName {
+                defaultValue = """FOB Alpha""";
+            };
+            class ATLAS_parentBase {
+                displayName = "Parent Base";
+                tooltip = "Name of the MOB that supplies this FOB";
+                typeName = "STRING";
+                defaultValue = """Main Base""";
+            };
+            class ATLAS_garrisonSize: ATLAS_garrisonSize {
+                defaultValue = 40;
+            };
+            class ATLAS_autoResupply {
+                displayName = "Auto Resupply";
+                tooltip = "Automatically request resupply when supplies drop";
+                typeName = "BOOL";
+                defaultValue = 1;
+            };
+        };
+    };
+
+    class ATLAS_Module_Base_COP: ATLAS_Module_Base_FOB {
+        displayName = "ATLAS - Base (COP)";
+        icon = "\atlas_core\data\icon_cop.paa";
+        class Attributes: AttributesBase {
+            class ATLAS_side: ATLAS_side {};
+            class ATLAS_baseName: ATLAS_baseName {
+                defaultValue = """COP Bravo""";
+            };
+            class ATLAS_parentBase: ATLAS_parentBase {
+                defaultValue = """FOB Alpha""";
+            };
+            class ATLAS_garrisonSize: ATLAS_garrisonSize {
+                defaultValue = 20;
+            };
+            class ATLAS_autoResupply: ATLAS_autoResupply {};
+        };
+    };
+
+    class ATLAS_Module_Base_PB: ATLAS_Module_Base_FOB {
+        displayName = "ATLAS - Base (Patrol Base)";
+        icon = "\atlas_core\data\icon_pb.paa";
+        class Attributes: AttributesBase {
+            class ATLAS_side: ATLAS_side {};
+            class ATLAS_baseName: ATLAS_baseName {
+                defaultValue = """PB Charlie""";
+            };
+            class ATLAS_parentBase: ATLAS_parentBase {};
+            class ATLAS_garrisonSize: ATLAS_garrisonSize {
+                defaultValue = 10;
+            };
+        };
+    };
+
+    class ATLAS_Module_Base_OP: ATLAS_Module_Base_FOB {
+        displayName = "ATLAS - Base (Observation Post)";
+        icon = "\atlas_core\data\icon_op.paa";
+        class Attributes: AttributesBase {
+            class ATLAS_side: ATLAS_side {};
+            class ATLAS_baseName: ATLAS_baseName {
+                defaultValue = """OP Delta""";
+            };
+            class ATLAS_parentBase: ATLAS_parentBase {};
+            class ATLAS_garrisonSize: ATLAS_garrisonSize {
+                defaultValue = 4;
+            };
+        };
+    };
+
+    // === ATLAS Objective Module ===
+    class ATLAS_Module_Objective: Module_F {
+        scope = 2;
+        displayName = "ATLAS - Objective";
+        category = "ATLAS";
+        function = "ATLAS_fnc_core_moduleObjective";
+        isGlobal = 1;
+        isTriggerActivated = 0;
+        icon = "\atlas_core\data\icon_objective.paa";
+
+        class Attributes: AttributesBase {
+            class ATLAS_objName {
+                displayName = "Objective Name";
+                typeName = "STRING";
+                defaultValue = """Objective Alpha""";
+            };
+            class ATLAS_objType {
+                displayName = "Objective Type";
+                typeName = "NUMBER";
+                class values {
+                    class strategic { name = "Strategic"; value = 0; default = 1; };
+                    class tactical  { name = "Tactical";  value = 1; };
+                    class civilian  { name = "Civilian";  value = 2; };
+                };
+            };
+            class ATLAS_objOwner {
+                displayName = "Initial Owner";
+                typeName = "NUMBER";
+                class values {
+                    class none       { name = "Uncontrolled"; value = -1; default = 1; };
+                    class west       { name = "BLUFOR";       value = 1; };
+                    class east       { name = "OPFOR";        value = 0; };
+                    class resistance { name = "INDFOR";       value = 2; };
+                };
+            };
+            class ATLAS_objPriority {
+                displayName = "Priority";
+                typeName = "NUMBER";
+                class values {
+                    class low      { name = "Low";      value = 250; };
+                    class medium   { name = "Medium";   value = 500; default = 1; };
+                    class high     { name = "High";     value = 750; };
+                    class critical { name = "Critical"; value = 1000; };
+                };
+            };
+            class ATLAS_objRadius {
+                displayName = "Objective Radius (m)";
+                tooltip = "Area around this position considered part of the objective";
+                typeName = "NUMBER";
+                defaultValue = 300;
+            };
+        };
+    };
+
+    // === ATLAS Zone Modules ===
+    class ATLAS_Module_MilPlacement: Module_F {
+        scope = 2;
+        displayName = "ATLAS - Military Placement";
+        category = "ATLAS";
+        function = "ATLAS_fnc_core_modulePlacement";
+        isGlobal = 1;
+        icon = "\atlas_core\data\icon_placement.paa";
+
+        class Attributes: AttributesBase {
+            class ATLAS_side {
+                displayName = "Side";
+                typeName = "NUMBER";
+                class values {
+                    class west { name = "BLUFOR"; value = 1; default = 1; };
+                    class east { name = "OPFOR";  value = 0; };
+                    class resistance { name = "INDFOR"; value = 2; };
+                };
+            };
+            class ATLAS_faction {
+                displayName = "Faction Override";
+                tooltip = "Leave empty to use side default";
+                typeName = "STRING";
+                defaultValue = """""";
+            };
+            class ATLAS_placementRadius {
+                displayName = "Placement Radius (m)";
+                typeName = "NUMBER";
+                defaultValue = 1000;
+            };
+            class ATLAS_localForceScale {
+                displayName = "Local Force Scale";
+                tooltip = "Multiplier for this placement zone (stacks with global)";
+                typeName = "NUMBER";
+                defaultValue = 1.0;
+            };
+        };
+    };
+
+    class ATLAS_Module_CQBZone: Module_F {
+        scope = 2;
+        displayName = "ATLAS - CQB Zone";
+        category = "ATLAS";
+        function = "ATLAS_fnc_core_moduleCQB";
+        isGlobal = 1;
+        icon = "\atlas_core\data\icon_cqb.paa";
+
+        class Attributes: AttributesBase {
+            class ATLAS_side {
+                displayName = "Garrison Side";
+                typeName = "NUMBER";
+                class values {
+                    class west { name = "BLUFOR"; value = 1; };
+                    class east { name = "OPFOR";  value = 0; default = 1; };
+                    class resistance { name = "INDFOR"; value = 2; };
+                };
+            };
+            class ATLAS_density {
+                displayName = "Garrison Density";
+                typeName = "NUMBER";
+                class values {
+                    class light  { name = "Light";  value = 0; };
+                    class medium { name = "Medium"; value = 1; default = 1; };
+                    class heavy  { name = "Heavy";  value = 2; };
+                };
+            };
+            class ATLAS_radius {
+                displayName = "Zone Radius (m)";
+                typeName = "NUMBER";
+                defaultValue = 500;
+            };
+        };
+    };
+
+    class ATLAS_Module_CivZone: Module_F {
+        scope = 2;
+        displayName = "ATLAS - Civilian Zone";
+        category = "ATLAS";
+        function = "ATLAS_fnc_core_moduleCivilian";
+        isGlobal = 1;
+        icon = "\atlas_core\data\icon_civilian.paa";
+
+        class Attributes: AttributesBase {
+            class ATLAS_density {
+                displayName = "Density Multiplier";
+                tooltip = "0 = no civilians, 1 = normal, 2 = double";
+                typeName = "NUMBER";
+                defaultValue = 1.0;
+            };
+            class ATLAS_traffic {
+                displayName = "Vehicle Traffic";
+                typeName = "BOOL";
+                defaultValue = 1;
+            };
+            class ATLAS_interactions {
+                displayName = "Civilian Interactions";
+                typeName = "BOOL";
+                defaultValue = 1;
+            };
+            class ATLAS_hostility {
+                displayName = "Initial Hostility";
+                tooltip = "-100 (friendly) to 100 (hostile)";
+                typeName = "NUMBER";
+                defaultValue = 0;
+            };
+        };
+    };
+
+    class ATLAS_Module_ExclusionZone: Module_F {
+        scope = 2;
+        displayName = "ATLAS - Exclusion Zone";
+        category = "ATLAS";
+        function = "ATLAS_fnc_core_moduleExclusion";
+        isGlobal = 1;
+        icon = "\atlas_core\data\icon_exclusion.paa";
+
+        class Attributes: AttributesBase {
+            class ATLAS_radius {
+                displayName = "Radius (m)";
+                typeName = "NUMBER";
+                defaultValue = 500;
+            };
+        };
+    };
+
+    class ATLAS_Module_SupplyDepot: Module_F {
+        scope = 2;
+        displayName = "ATLAS - Supply Depot";
+        category = "ATLAS";
+        function = "ATLAS_fnc_core_moduleSupplyDepot";
+        isGlobal = 1;
+        icon = "\atlas_core\data\icon_depot.paa";
+
+        class Attributes: AttributesBase {
+            class ATLAS_side {
+                displayName = "Side";
+                typeName = "NUMBER";
+                class values {
+                    class west { name = "BLUFOR"; value = 1; default = 1; };
+                    class east { name = "OPFOR";  value = 0; };
+                    class resistance { name = "INDFOR"; value = 2; };
+                };
+            };
+            class ATLAS_resources {
+                displayName = "Available Resources";
+                tooltip = "Comma-separated: ammo,fuel,food,water,medical,construction";
+                typeName = "STRING";
+                defaultValue = """ammo,fuel""";
+            };
+            class ATLAS_capacity {
+                displayName = "Capacity";
+                tooltip = "Maximum stock level (arbitrary units)";
+                typeName = "NUMBER";
+                defaultValue = 1000;
+            };
+        };
+    };
+
+    class ATLAS_Module_IEDZone: Module_F {
+        scope = 2;
+        displayName = "ATLAS - IED Zone";
+        category = "ATLAS_Asymmetric";
+        function = "ATLAS_fnc_core_moduleIED";
+        isGlobal = 1;
+        icon = "\atlas_core\data\icon_ied.paa";
+
+        class Attributes: AttributesBase {
+            class ATLAS_density {
+                displayName = "IED Density";
+                typeName = "NUMBER";
+                class values {
+                    class low    { name = "Low";    value = 0; };
+                    class medium { name = "Medium"; value = 1; default = 1; };
+                    class high   { name = "High";   value = 2; };
+                };
+            };
+            class ATLAS_types {
+                displayName = "Allowed Types";
+                tooltip = "Comma-separated: IED,VBIED,SUICIDE";
+                typeName = "STRING";
+                defaultValue = """IED""";
+            };
+            class ATLAS_radius {
+                displayName = "Zone Radius (m)";
+                typeName = "NUMBER";
+                defaultValue = 1000;
+            };
+        };
+    };
+};
+```
+
+**Example mission setup using editor modules:**
+
+```
+A typical insurgency mission on Altis:
+
+1. Place ATLAS Game Master anywhere
+   → Preset: Insurgency, BLUFOR: BLU_F, OPFOR: OPF_G_F, Auto-detect: On
+
+2. Place ATLAS Base - MOB at Altis airport
+   → Side: BLUFOR, Name: "Camp Liberty", Garrison: 100
+
+3. Place ATLAS Base - FOB near Kavala
+   → Side: BLUFOR, Name: "FOB Hammer", Parent: "Camp Liberty", Garrison: 40
+
+4. Place ATLAS Base - COP at crossroads south of Kavala
+   → Side: BLUFOR, Name: "COP Anvil", Parent: "FOB Hammer", Garrison: 15
+
+5. Place 2x ATLAS Objectives at key towns
+   → Strategic, OPFOR-owned, High priority
+
+6. Place ATLAS Civilian Zone over Kavala
+   → Density: 2.0 (dense urban), Traffic: Yes, Hostility: 20 (slightly hostile)
+
+7. Place ATLAS IED Zone along main highway
+   → Density: Medium, Types: IED,VBIED, Radius: 2000
+
+8. Place ATLAS Military Placement in OPFOR mountains
+   → Side: OPFOR, Radius: 3000, Force Scale: 0.8
+
+Result: A fully configured insurgency mission with BLUFOR base chain
+(MOB → FOB → COP), OPFOR in the mountains, civilians in Kavala,
+IEDs on the highway, and auto-detected objectives everywhere else.
+Total editor objects: 9 (vs 20+ in ALiVE)
+```
+
 **Advanced (programmatic config):**
 
 Full control via `description.ext` or runtime SQF:
