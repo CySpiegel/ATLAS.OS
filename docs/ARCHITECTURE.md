@@ -33,6 +33,7 @@
 23. [Optional Mod Integration Philosophy](#23-optional-mod-integration)
 24. [Feature Parity Gap Analysis](#24-gap-analysis)
 25. [Visual Assets & Icon Specification](#25-visual-assets)
+26. [Advanced Simulation Systems](#26-advanced-simulation)
 
 ---
 
@@ -4905,6 +4906,959 @@ All source PNGs must be:
 - RGBA with alpha channel for transparency
 - sRGB color space
 - Crisp at target size (no anti-aliasing artifacts at 32x32)
+
+---
+
+## 26. Advanced Simulation Systems
+
+These systems elevate ATLAS from a battlefield spawner into a living military simulation. Each integrates with existing modules via the event bus.
+
+---
+
+### 26.1 AI Morale & Cohesion System
+
+Every profile has a morale value (0-100) that affects AI behavior. Morale is calculated from battlefield conditions and drives behavioral transitions.
+
+#### Morale Factors
+
+| Factor | Effect on Morale | Magnitude |
+|--------|-----------------|-----------|
+| Taking casualties | Decrease | -15 per KIA in group, -8 per WIA |
+| Leader killed | Decrease | -25 (leadership loss) |
+| Under fire (suppressed) | Decrease | -5 per minute under fire |
+| Surrounded (enemies in 3+ directions) | Decrease | -20 |
+| Low ammo (<20%) | Decrease | -15 |
+| Low supply at base | Decrease | -10 |
+| Outnumbered (force ratio <0.5) | Decrease | -15 |
+| No friendly units nearby | Decrease | -10 (isolation) |
+| Friendly casualties visible | Decrease | -5 per corpse in 100m |
+| Winning engagement (killing enemies) | Increase | +5 per enemy KIA |
+| Reinforcements arrive | Increase | +20 |
+| Resupply delivered | Increase | +10 |
+| Nearby friendly units | Increase | +5 per friendly group in 500m |
+| Holding defensive position | Increase | +10 (fortification bonus) |
+| Officer/NCO present | Increase | +10 (leadership bonus) |
+| Fresh/rested (just spawned) | Increase | Start at 75-100 depending on faction |
+| Time since last contact | Increase | +2 per minute of calm (recovery) |
+
+#### Morale Thresholds and Behavior
+
+```sqf
+// Morale state machine (per profile)
+// STEADY (100-60)  → Normal combat behavior, follows orders
+// SHAKEN (59-40)   → Fights from cover only, won't advance, slower movement
+// BREAKING (39-20) → Attempts withdrawal toward nearest friendly position
+// ROUTED (19-5)    → Drops heavy weapons, flees at sprint, ignores orders
+// SURRENDERED (4-0) → Stops fighting, hands up (ACE captives if loaded)
+
+ATLAS_fnc_morale_evaluate = {
+    params ["_profile"];
+    private _morale = _profile get "morale";
+
+    private _state = switch (true) do {
+        case (_morale >= 60): { "STEADY" };
+        case (_morale >= 40): { "SHAKEN" };
+        case (_morale >= 20): { "BREAKING" };
+        case (_morale >= 5):  { "ROUTED" };
+        default               { "SURRENDERED" };
+    };
+
+    private _oldState = _profile getOrDefault ["moraleState", "STEADY"];
+    if (_state != _oldState) then {
+        _profile set ["moraleState", _state];
+        ["atlas_profile_moraleChanged", [_profile get "id", _state, _oldState, _morale]]
+            call CBA_fnc_localEvent;
+    };
+
+    _state
+};
+```
+
+#### Applying Morale to Spawned Units
+
+```sqf
+// When profile is spawned, apply morale-based behavior
+ATLAS_fnc_morale_applyToGroup = {
+    params ["_group", "_moraleState"];
+
+    switch (_moraleState) do {
+        case "STEADY": {
+            _group setBehaviour "AWARE";
+            _group setCombatMode "YELLOW";
+        };
+        case "SHAKEN": {
+            _group setBehaviour "COMBAT";
+            _group setCombatMode "GREEN";    // Only fire if fired upon
+            { _x setUnitPos "DOWN" } forEach units _group;
+        };
+        case "BREAKING": {
+            // Withdrawal: find nearest friendly objective and move toward it
+            private _fallback = [_group] call ATLAS_fnc_morale_findFallbackPos;
+            _group setBehaviour "COMBAT";
+            _group setCombatMode "GREEN";
+            _group doMove _fallback;
+        };
+        case "ROUTED": {
+            // Drop heavy weapons, flee
+            {
+                if (primaryWeapon _x != "" && {
+                    getNumber (configFile >> "CfgWeapons" >> primaryWeapon _x >> "weight") > 50
+                }) then {
+                    _x action ["DropWeapon", _x, primaryWeapon _x];
+                };
+                _x setSpeedMode "FULL";
+            } forEach units _group;
+            _group setBehaviour "CARELESS";
+            _group doMove ([getPos leader _group, 500, random 360] call BIS_fnc_relPos);
+        };
+        case "SURRENDERED": {
+            {
+                _x action ["DropWeapon", _x, primaryWeapon _x];
+                _x playMoveNow "AmovPercMstpSsurWnonDnon";
+                _x disableAI "MOVE";
+                _x setCaptive true;
+            } forEach units _group;
+        };
+    };
+};
+```
+
+#### Morale Contagion
+
+Morale spreads between nearby profiles:
+- Routing units in line of sight reduce nearby friendly morale by -5
+- Surrendering units reduce nearby friendly morale by -10
+- Steadily fighting units boost nearby morale by +3
+
+#### Faction Morale Modifiers
+
+Different factions have different base morale characteristics:
+
+```sqf
+// Configurable per faction via CBA Settings or description.ext
+ATLAS_moraleConfig = createHashMapFromArray [
+    ["BLU_F",  createHashMapFromArray [["baseMorale", 85], ["recoveryRate", 3], ["breakingThreshold", 35]]],
+    ["OPF_F",  createHashMapFromArray [["baseMorale", 75], ["recoveryRate", 2], ["breakingThreshold", 30]]],
+    ["IND_F",  createHashMapFromArray [["baseMorale", 65], ["recoveryRate", 2], ["breakingThreshold", 25]]],
+    ["OPF_G_F", createHashMapFromArray [["baseMorale", 60], ["recoveryRate", 1], ["breakingThreshold", 20]]]
+    // Insurgent forces break more easily but also recover quickly when regrouped
+];
+```
+
+**Events:**
+- `atlas_profile_moraleChanged` — `[profileId, newState, oldState, moraleValue]`
+- `atlas_profile_surrendered` — `[profileId, pos]`
+- `atlas_profile_routed` — `[profileId, fleeDirection]`
+
+**New functions:**
+```
+atlas_profile/fnc/
+  fn_moraleInit.sqf              # Set initial morale based on faction config
+  fn_moraleUpdate.sqf            # PFH: evaluate morale factors, update value
+  fn_moraleApplyToGroup.sqf      # Apply morale state to spawned group behavior
+  fn_moraleFindFallback.sqf      # Find nearest friendly position for withdrawal
+  fn_moraleContagion.sqf         # Spread morale effects to nearby profiles
+  fn_moraleRecovery.sqf          # Gradual morale recovery when out of contact
+```
+
+**CBA Settings:**
+```
+ATLAS - Morale
+  ├── Enable Morale System       [Yes / No, default Yes]          (mission setting)
+  ├── Morale Recovery Rate       [0.5-5.0, default 2.0 per min]   (runtime tunable)
+  ├── Breaking Threshold         [10-50, default 30]               (runtime tunable)
+  ├── Surrender Threshold        [0-15, default 5]                 (runtime tunable)
+  ├── Contagion Radius           [100-1000m, default 300]          (runtime tunable)
+  └── Faction Morale Editable    [Yes / No, default No]            (mission setting)
+```
+
+---
+
+### 26.2 Dynamic Weather Operations Impact
+
+Weather isn't just visual — it directly affects every operational system.
+
+#### Weather State
+
+```sqf
+ATLAS_weatherState = createHashMapFromArray [
+    ["overcast", overcast],          // 0-1
+    ["rain", rain],                  // 0-1
+    ["fog", fog],                    // 0-1
+    ["wind", wind],                  // [x,y,z]
+    ["windSpeed", vectorMagnitude wind],
+    ["temperature", 25],             // Celsius (from ACE weather if loaded)
+    ["timeOfDay", dayTime],          // 0-24
+    ["isNight", sunOrMoon < 0.3],
+    ["visibility", viewDistance * (1 - fog) * (1 - rain * 0.3)],
+    ["condition", "clear"]           // clear, overcast, rain, storm, fog
+];
+```
+
+#### Operational Impact Table
+
+| Weather | System Affected | Impact |
+|---------|----------------|--------|
+| **Heavy Rain** | Virtual movement | Wheeled vehicles: -40% speed on dirt/track roads |
+| **Heavy Rain** | CAS missions | Degraded accuracy, may cancel if ceiling < 200m |
+| **Heavy Rain** | Civilian | Civilians stay indoors, traffic reduced 80% |
+| **Heavy Rain** | IED detection | -30% detection chance (harder to spot) |
+| **Heavy Rain** | Base supply | Water consumption reduced (natural collection) |
+| **Fog** | CAS missions | Cancelled if visibility < 500m |
+| **Fog** | Recon | Ineffective, intel quality reduced |
+| **Fog** | OPCOM | Delays attacks until fog lifts (conventional forces) |
+| **Fog** | Insurgent ops | +20% chance of IED placement, ambush activity |
+| **Night** | OPCOM (conventional) | Reduces tempo, prefers defensive posture |
+| **Night** | OPCOM (insurgent) | Increases tempo, more ambush/IED activity |
+| **Night** | Civilian | Civilians sleep (almost none spawned), traffic zero |
+| **Night** | Detection system | -1.0 detection score modifier (harder to spot) |
+| **Night** | CQB | Garrisons use flashlights/NVG if equipped |
+| **High Wind** | Air ops | Helicopter ops degraded >40 km/h, cancelled >60 km/h |
+| **High Wind** | Artillery | Increased dispersion |
+| **High Wind** | Naval | Speed penalty, small boats unable to operate >50 km/h |
+| **Heat (>40°C)** | Base supply | Water consumption ×2.0 |
+| **Heat (>40°C)** | Virtual movement | Infantry speed -20% (fatigue) |
+| **Storm** | All air | Grounded |
+| **Storm** | Naval | All ships seek port |
+| **Storm** | Virtual movement | All types -30% speed |
+
+#### Implementation
+
+```sqf
+// PFH: update weather state every 60 seconds
+ATLAS_fnc_weather_updateState = {
+    private _state = ATLAS_weatherState;
+    _state set ["overcast", overcast];
+    _state set ["rain", rain];
+    _state set ["fog", fog];
+    _state set ["wind", wind];
+    _state set ["windSpeed", vectorMagnitude wind];
+    _state set ["isNight", sunOrMoon < 0.3];
+
+    // Classify condition
+    private _condition = switch (true) do {
+        case (fog > 0.7): { "fog" };
+        case (rain > 0.7 && vectorMagnitude wind > 15): { "storm" };
+        case (rain > 0.3): { "rain" };
+        case (overcast > 0.7): { "overcast" };
+        default { "clear" };
+    };
+
+    private _oldCondition = _state get "condition";
+    _state set ["condition", _condition];
+
+    if (_condition != _oldCondition) then {
+        ["atlas_weather_conditionChanged", [_condition, _oldCondition]] call CBA_fnc_localEvent;
+    };
+};
+
+// OPCOM subscribes to weather changes
+["atlas_weather_conditionChanged", {
+    params ["_condition", "_old"];
+    if (_condition in ["storm", "fog"]) then {
+        // Cancel pending air missions
+        { [_x] call ATLAS_fnc_air_cancelMission } forEach (ATLAS_atoQueue select {
+            _x get "status" in ["queued", "assigned"]
+        });
+    };
+}] call CBA_fnc_addEventHandler;
+```
+
+**New functions:**
+```
+atlas_core/fnc/
+  fn_weatherUpdateState.sqf      # PFH: poll weather, update state, fire events
+  fn_weatherGetSpeedMod.sqf      # Get movement speed modifier for current weather
+  fn_weatherGetVisibility.sqf    # Get effective visibility
+  fn_weatherCanFly.sqf           # Can aircraft operate in current conditions?
+  fn_weatherGetCivActivity.sqf   # Get civilian activity modifier (0-1)
+```
+
+**Events:** `atlas_weather_conditionChanged` — `[newCondition, oldCondition]`
+
+---
+
+### 26.3 Rules of Engagement (ROE) System
+
+Configurable ROE per side with automatic violation detection.
+
+#### ROE Levels
+
+```sqf
+// ROE states (per side, configurable per player group via C2)
+// WEAPONS_HOLD   — Do not fire unless fired upon (force protection only)
+// WEAPONS_TIGHT  — Fire only at positively identified threats (PID required)
+// WEAPONS_FREE   — Engage any hostile target
+
+ATLAS_roe = createHashMapFromArray [
+    [west, "WEAPONS_TIGHT"],   // Default for conventional BLUFOR
+    [east, "WEAPONS_FREE"],    // OPFOR default
+    [resistance, "WEAPONS_TIGHT"]
+];
+```
+
+#### Violation Detection
+
+```sqf
+// Monitor player-caused civilian casualties
+addMissionEventHandler ["EntityKilled", {
+    params ["_killed", "_killer", "_instigator"];
+    if (isNull _instigator) then { _instigator = _killer };
+    if (!isPlayer _instigator) exitWith {};
+
+    // Was the killed unit a civilian?
+    if (_killed getVariable ["ATLAS_isCivilian", false]) then {
+        private _roe = ATLAS_roe get (side group _instigator);
+        ["atlas_roe_violation", [
+            _instigator, _killed, "CIVILIAN_KILLED", _roe
+        ]] call CBA_fnc_localEvent;
+    };
+
+    // Was an unarmed unit killed under WEAPONS_TIGHT?
+    if (_roe == "WEAPONS_TIGHT") then {
+        if (currentWeapon _killed == "") then {
+            ["atlas_roe_violation", [
+                _instigator, _killed, "UNARMED_KILLED", _roe
+            ]] call CBA_fnc_localEvent;
+        };
+    };
+}];
+
+// Handle violations
+["atlas_roe_violation", {
+    params ["_player", "_victim", "_type", "_roe"];
+
+    // Hearts & minds penalty
+    private _pos = getPos _victim;
+    [_pos, -25, "CIVILIAN_KILLED"] call ATLAS_fnc_civ_stabilityUpdate;
+
+    // Player notification
+    ["atlas_c2_notification", [
+        format ["ROE VIOLATION: %1 — %2", _type, name _player],
+        "warning"
+    ]] call CBA_fnc_globalEvent;
+
+    // Statistics tracking
+    ["atlas_stats_roeViolation", [_player, _type]] call CBA_fnc_localEvent;
+
+    // Optional: restrict support access
+    if (ATLAS_setting_roeConsequences) then {
+        _player setVariable ["ATLAS_supportRestricted", true, true];
+        _player setVariable ["ATLAS_supportRestrictedUntil", serverTime + 300, true];
+    };
+}] call CBA_fnc_addEventHandler;
+```
+
+**CBA Settings:**
+```
+ATLAS - Rules of Engagement
+  ├── Enable ROE System          [Yes / No, default No]           (mission setting)
+  ├── Default BLUFOR ROE         [Hold / Tight / Free]            (runtime tunable)
+  ├── Default OPFOR ROE          [Hold / Tight / Free]            (runtime tunable)
+  ├── Violation Consequences     [Yes / No, default Yes]          (mission setting)
+  │     (restrict support access after violation)
+  ├── Consequence Duration       [60-600s, default 300]           (runtime tunable)
+  └── Notify All Players         [Yes / No, default Yes]          (runtime tunable)
+```
+
+---
+
+### 26.4 Medical Evacuation Chain
+
+Models the real military medical pipeline: Point of Injury → CCP → Role 1 → Role 2 → Role 3.
+
+#### Medical Capability by Base Type
+
+| Base Type | Medical Role | Capability | Treatment Time |
+|-----------|-------------|-----------|---------------|
+| **OP** | None | Buddy aid only | — |
+| **PB** | CCP | Stabilize (stop bleeding, basic airway) | 5 min |
+| **COP** | Role 1 | Battalion aid (IV, advanced airway, minor surgery) | 15 min |
+| **FOB** | Role 2 | Forward surgical (damage control surgery, blood transfusion) | 30 min |
+| **MOB** | Role 3 | Hospital (definitive surgery, ICU, full treatment) | 60 min |
+
+#### MEDEVAC Flow
+
+```sqf
+// 1. Casualty occurs (player or AI wounded)
+// 2. Nearest base with adequate medical role is identified
+// 3. MEDEVAC mission generated:
+//    - Ground ambulance if base is close and roads are safe
+//    - Helicopter MEDEVAC if available and weather permits
+// 4. Casualty transported to medical facility
+// 5. Treatment time based on wound severity and facility capability
+// 6. If facility can't handle severity → forward to next higher role
+// 7. On treatment complete: casualty RTD (return to duty) or KIA
+
+ATLAS_fnc_medevac_findFacility = {
+    params ["_pos", "_severity"];
+    // _severity: "minor" (Role 1+), "serious" (Role 2+), "critical" (Role 3)
+
+    private _requiredRole = switch (_severity) do {
+        case "minor":    { 1 };
+        case "serious":  { 2 };
+        case "critical": { 3 };
+        default          { 1 };
+    };
+
+    // Find nearest base with adequate medical capability
+    private _bestBase = objNull;
+    private _bestDist = 1e10;
+    {
+        private _base = _y;
+        private _role = switch (_base get "type") do {
+            case "MOB": { 3 }; case "FOB": { 2 }; case "COP": { 1 };
+            default { 0 };
+        };
+        if (_role >= _requiredRole && _base get "side" == side group _pos) then {
+            private _dist = _pos distance (_base get "pos");
+            if (_dist < _bestDist) then {
+                _bestDist = _dist;
+                _bestBase = _base;
+            };
+        };
+    } forEach ATLAS_baseRegistry;
+
+    _bestBase
+};
+```
+
+**Events:**
+- `atlas_medevac_requested` — `[casualtyId, severity, pos]`
+- `atlas_medevac_enroute` — `[medevacId, vehicleType, eta]`
+- `atlas_medevac_arrived` — `[medevacId, facilityBaseId]`
+- `atlas_medevac_treated` — `[casualtyId, outcome ("RTD"|"KIA")]`
+
+**New functions:**
+```
+atlas_logistics/fnc/
+  fn_medevacRequest.sqf          # Create MEDEVAC request
+  fn_medevacFindFacility.sqf     # Find appropriate medical facility
+  fn_medevacDispatch.sqf         # Dispatch ambulance or helicopter
+  fn_medevacTreat.sqf            # Process treatment at facility
+  fn_medevacGetSeverity.sqf      # Assess casualty severity (ACE integration)
+```
+
+---
+
+### 26.5 Zeus Integration
+
+Zeus players can interact with all ATLAS systems via a dedicated Zeus module.
+
+#### Zeus Capabilities
+
+```sqf
+// Register ATLAS Zeus modules in XEH_postInit.sqf
+if (!isNull (getAssignedCuratorLogic player)) then {
+    // This player is a Zeus curator
+
+    // Add Zeus modules for ATLAS operations
+    private _curator = getAssignedCuratorLogic player;
+
+    // Module: Spawn ATLAS Profile at position
+    // Module: Issue OPCOM order to selected group
+    // Module: Create objective at position
+    // Module: Establish base at position
+    // Module: Trigger event (supply cut, reinforcement, weather change)
+    // Module: Place IED / insurgent cell
+    // Module: Adjust morale of selected group
+    // Module: Change ROE for a side
+    // Module: Force OPCOM re-evaluation
+    // Module: Generate player mission
+    // Module: Modify civilian hostility in area
+    // Module: Spawn CASEVAC encounter
+    // Module: Adjust supply levels at base
+};
+```
+
+#### Zeus Event Bridge
+
+```sqf
+// Zeus actions fire ATLAS events, keeping everything in the event system
+// Example: Zeus places an objective
+ATLAS_fnc_zeus_createObjective = {
+    params ["_pos", "_type", "_owner", "_priority"];
+    // Creates objective through the normal ATLAS API
+    [_pos, _type, 300, _owner] call ATLAS_fnc_core_objectiveCreate;
+    // OPCOM picks it up via atlas_objective_registered event automatically
+};
+```
+
+**New PBO:** `atlas_compat_zeus` (optional, loads if Zeus is active)
+
+```
+atlas_compat_zeus/fnc/
+  fn_init.sqf                    # Detect curator, register modules
+  fn_moduleSpawnProfile.sqf      # Zeus module: spawn profile
+  fn_moduleIssueOrder.sqf        # Zeus module: issue OPCOM order
+  fn_moduleCreateObjective.sqf   # Zeus module: create objective
+  fn_moduleEstablishBase.sqf     # Zeus module: establish base
+  fn_moduleTriggerEvent.sqf      # Zeus module: trigger custom event
+  fn_modulePlaceIED.sqf          # Zeus module: place IED
+  fn_moduleAdjustMorale.sqf      # Zeus module: adjust group morale
+  fn_moduleChangeROE.sqf         # Zeus module: change ROE
+  fn_moduleForceReeval.sqf       # Zeus module: force OPCOM re-evaluation
+  fn_moduleGenerateMission.sqf   # Zeus module: generate player mission
+  fn_moduleAdjustHostility.sqf   # Zeus module: modify civilian hostility
+  fn_moduleSpawnEncounter.sqf    # Zeus module: spawn civilian encounter
+  fn_moduleAdjustSupply.sqf      # Zeus module: adjust base supply levels
+```
+
+---
+
+### 26.6 After Action Review (AAR)
+
+Structured debrief system that records the session timeline and generates reports.
+
+#### Event Recording
+
+```sqf
+// AAR records significant events throughout the session
+ATLAS_aarTimeline = [];  // Array of event records, time-ordered
+
+// Every significant ATLAS event is recorded
+{
+    [_x, {
+        params ["_data"];
+        ATLAS_aarTimeline pushBack [serverTime, _x, _data];
+    }] call CBA_fnc_addEventHandler;
+} forEach [
+    "atlas_objective_stateChanged",
+    "atlas_profile_destroyed",
+    "atlas_profile_moraleChanged",
+    "atlas_logistics_delivered",
+    "atlas_logistics_convoyDestroyed",
+    "atlas_air_missionComplete",
+    "atlas_air_aircraftLost",
+    "atlas_base_established",
+    "atlas_base_overrun",
+    "atlas_roe_violation",
+    "atlas_asymmetric_iedDetonated",
+    "atlas_civ_casevacComplete",
+    "atlas_medevac_treated",
+    "atlas_frontline_updated"
+];
+```
+
+#### AAR Report Generation
+
+```sqf
+// Generate AAR at mission end or on admin request
+ATLAS_fnc_aar_generate = {
+    private _report = createHashMapFromArray [
+        ["sessionStart", ATLAS_sessionStartTime],
+        ["sessionEnd", serverTime],
+        ["duration", serverTime - ATLAS_sessionStartTime],
+        ["timeline", ATLAS_aarTimeline],
+        ["statistics", call ATLAS_fnc_stats_aggregate],
+        ["objectiveChanges", call ATLAS_fnc_aar_objectiveHistory],
+        ["frontlineMovement", call ATLAS_fnc_aar_frontlineHistory],
+        ["casualties", createHashMapFromArray [
+            [west, ATLAS_stats get "blufor_kia"],
+            [east, ATLAS_stats get "opfor_kia"],
+            [resistance, ATLAS_stats get "indfor_kia"],
+            [civilian, ATLAS_stats get "civilian_kia"]
+        ]],
+        ["heartsMinds", call ATLAS_fnc_aar_stabilityHistory],
+        ["supplyConsumed", call ATLAS_fnc_aar_supplyHistory],
+        ["missionsCompleted", call ATLAS_fnc_aar_missionHistory],
+        ["roeViolations", ATLAS_stats getOrDefault ["roeViolations", 0]],
+        ["playerParticipation", call ATLAS_fnc_aar_playerStats]
+    ];
+
+    // Save to PNS for local review
+    profileNamespace setVariable ["ATLAS_lastAAR", [_report] call ATLAS_fnc_persist_serialize];
+
+    // Save to PostgreSQL for web dashboard
+    if (ATLAS_pgConnected) then {
+        ["STATS_WRITE", str _report] call ATLAS_fnc_persist_extensionCallAsync;
+    };
+
+    _report
+};
+```
+
+#### AAR Display (in-game)
+
+A dedicated AAR tab in the C2 tablet (post-mission) or admin panel showing:
+- Timeline of major events with timestamps
+- Map with objective ownership changes over time
+- Frontline progression (animated or stepped)
+- Casualty summary by side
+- Hearts & minds progression graph
+- Supply consumption graph
+- Mission completion rate
+- Player statistics
+
+**New functions:**
+```
+atlas_stats/fnc/
+  fn_aarRecord.sqf               # Record event to timeline
+  fn_aarGenerate.sqf             # Generate full AAR report
+  fn_aarObjectiveHistory.sqf     # Extract objective change history
+  fn_aarFrontlineHistory.sqf     # Extract frontline snapshots over time
+  fn_aarStabilityHistory.sqf     # Extract H&M progression
+  fn_aarSupplyHistory.sqf        # Extract supply consumption data
+  fn_aarMissionHistory.sqf       # Extract completed missions
+  fn_aarPlayerStats.sqf          # Extract per-player statistics
+  fn_aarDisplay.sqf              # Show AAR in UI (admin/post-mission)
+```
+
+---
+
+### 26.7 Electronic Warfare & SIGINT
+
+An electronic warfare layer that adds depth to the intelligence system.
+
+#### SIGINT (Signals Intelligence)
+
+```sqf
+// SIGINT sources:
+// 1. Radio intercept — detect enemy radio transmissions (requires proximity)
+// 2. Direction finding — triangulate enemy transmitter positions
+// 3. Drone surveillance — UAV feed provides real-time intel
+// 4. Jamming — disrupt enemy communications in an area
+
+ATLAS_sigintStations = createHashMap;  // stationId -> HashMap
+{
+    "id": string,
+    "type": "intercept"|"direction_find"|"jammer",
+    "pos": [x,y,z],
+    "range": number (meters),
+    "side": side,
+    "active": boolean,
+    "detections": Array<intelHashMap>
+}
+```
+
+#### Radio Intercept
+
+When an enemy profile transmits (OPCOM issues order, logistics convoy reports status), the transmission can be intercepted if a SIGINT station or equipped player is in range:
+
+```sqf
+// When OPCOM issues an order, it "transmits"
+["atlas_opcom_orderIssued", {
+    params ["_profileId", "_order"];
+    private _profile = ATLAS_profileRegistry get _profileId;
+    private _pos = _profile get "pos";
+
+    // Check if any enemy SIGINT is in range
+    {
+        private _station = _y;
+        if (_station get "active" && _station get "side" != _profile get "side") then {
+            if (_pos distance (_station get "pos") < _station get "range") then {
+                // Intercepted! Generate intel from the transmission
+                private _accuracy = 0.5 + random 0.3; // Partial info from intercept
+                [createHashMapFromArray [
+                    ["type", "movement"],
+                    ["pos", _pos],
+                    ["side", _profile get "side"],
+                    ["source", "sigint"],
+                    ["confidence", _accuracy],
+                    ["details", format ["Intercepted order: %1 toward grid %2",
+                        _order get "type", _order get "targetObjective"]],
+                    ["reportedAt", serverTime]
+                ]] call ATLAS_fnc_intel_create;
+            };
+        };
+    } forEach ATLAS_sigintStations;
+}] call CBA_fnc_addEventHandler;
+```
+
+#### Jamming
+
+Jamming disrupts enemy communications in an area, degrading OPCOM's effectiveness:
+
+```sqf
+// Jammer effect: enemy OPCOM orders in jammed area have delayed execution
+// and increased chance of miscommunication (wrong target, wrong waypoint)
+// Also affects TFAR/ACRE2 if loaded — radio range reduced in jammed zone
+```
+
+#### UAV/Drone Integration
+
+```sqf
+// If a player is operating a UAV over an area, intel is automatically
+// generated for any enemy profiles detected in the UAV camera view
+// Uses Arma's built-in UAV camera detection + ATLAS spatial grid
+
+ATLAS_fnc_sigint_uavScan = {
+    params ["_uav"];
+    private _pos = getPosATL _uav;
+    private _altitude = _pos#2;
+    private _scanRadius = _altitude * 2; // Higher = wider scan but less detail
+
+    private _detected = [_pos, _scanRadius, "profiles"] call ATLAS_fnc_core_gridQuery;
+    {
+        private _profile = ATLAS_profileRegistry get _x;
+        if (_profile get "side" != side group (UAVControl _uav#0)) then {
+            [createHashMapFromArray [
+                ["type", "contact"],
+                ["pos", _profile get "pos"],
+                ["side", _profile get "side"],
+                ["source", "uav"],
+                ["confidence", 0.95],
+                ["size", [_profile] call ATLAS_fnc_profile_estimateSize],
+                ["reportedAt", serverTime]
+            ]] call ATLAS_fnc_intel_create;
+        };
+    } forEach _detected;
+};
+```
+
+**New functions:**
+```
+atlas_asymmetric/fnc/
+  fn_sigintStationCreate.sqf     # Create SIGINT station
+  fn_sigintIntercept.sqf         # Check for radio intercepts
+  fn_sigintDirectionFind.sqf     # Triangulate transmitter position
+  fn_sigintJammerActivate.sqf    # Activate jammer in area
+  fn_sigintJammerEffect.sqf      # Apply jammer effects to enemy ops
+  fn_sigintUAVScan.sqf           # UAV surveillance scan
+  fn_sigintUAVMonitor.sqf        # PFH: monitor active UAVs for intel
+```
+
+---
+
+### 26.8 Faction Diplomacy System
+
+For three-way conflicts where INDFOR's allegiance can shift.
+
+#### Diplomacy State
+
+```sqf
+ATLAS_diplomacy = createHashMap;
+// Key: "side1_side2" (sorted), Value: relation HashMap
+
+// Example:
+ATLAS_diplomacy set ["east_resistance", createHashMapFromArray [
+    ["relation", "neutral"],        // hostile, neutral, ceasefire, friendly, allied
+    ["score", 0],                   // -100 (war) to +100 (alliance)
+    ["ceasefireUntil", 0],          // serverTime when ceasefire expires (0 = none)
+    ["lastChange", serverTime]
+]];
+```
+
+#### Relation Levels
+
+| Score | Relation | AI Behavior |
+|-------|----------|-------------|
+| -100 to -50 | **Hostile** | Engage on sight, no quarter |
+| -49 to -10 | **Unfriendly** | Engage if threatened, aggressive patrols |
+| -9 to +9 | **Neutral** | Ignore unless provoked, tense standoffs |
+| +10 to +49 | **Ceasefire** | Do not engage, but maintain defensive posture |
+| +50 to +79 | **Friendly** | Share intel, allow passage, no engagement |
+| +80 to +100 | **Allied** | Fight together, share bases, coordinated ops |
+
+#### Diplomacy Events
+
+```sqf
+// Events that shift diplomacy:
+// Civilian casualties by a side        → other sides' opinion drops
+// Liberating an area from hostile side  → liberated population's side warms
+// Attacking a neutral/friendly side     → immediate shift to hostile
+// Providing aid to a side's civilians   → opinion improves
+// Ceasefire violation                   → trust drops severely
+
+// OPCOM factors diplomacy into decisions:
+// Won't attack neutral/friendly sides
+// May coordinate attacks with allied sides
+// Adjusts force posture on neutral borders (screen vs defend)
+```
+
+**New functions:**
+```
+atlas_opcom/fnc/
+  fn_diplomacyInit.sqf           # Initialize diplomacy state between all sides
+  fn_diplomacyGet.sqf            # Get relation between two sides
+  fn_diplomacyModify.sqf         # Adjust diplomacy score based on event
+  fn_diplomacyCeasefire.sqf      # Establish/break ceasefire
+  fn_diplomacyApplyToAI.sqf      # Set AI friend/foe based on diplomacy state
+```
+
+**Events:**
+- `atlas_diplomacy_changed` — `[side1, side2, oldRelation, newRelation, score]`
+- `atlas_diplomacy_ceasefireStarted` — `[side1, side2, duration]`
+- `atlas_diplomacy_ceasefireBroken` — `[side1, side2, violatorSide]`
+
+---
+
+### 26.9 Dynamic Reinforcement Delivery
+
+Reinforcements arrive visibly rather than spawning from nowhere.
+
+#### Delivery Methods
+
+| Method | Vehicle | When Used | Requirements |
+|--------|---------|-----------|-------------|
+| **Air transport** | C-130 / CH-47 equivalent | Fast, expensive | Airfield at MOB, air superiority |
+| **Helicopter** | Transport helo | Medium speed | Helipad at destination, weather permits |
+| **Ground convoy** | Trucks + escort | Slow, cheap | Road connection, route security |
+| **Naval landing** | Landing craft | Amphibious ops | Port/beach at destination |
+| **Paradrop** | Transport aircraft | Contested areas | Air superiority, paratroopers |
+
+```sqf
+// When reinforcement pool is tapped, create a visible delivery
+ATLAS_fnc_reinforcement_deliver = {
+    params ["_faction", "_forceType", "_count", "_destinationBase"];
+
+    private _base = ATLAS_baseRegistry get _destinationBase;
+    private _method = [_base, _forceType] call ATLAS_fnc_reinforcement_selectMethod;
+
+    switch (_method) do {
+        case "air_transport": {
+            // Spawn transport aircraft at map edge, fly to MOB airfield
+            // On landing: unload reinforcement profiles
+            // Players near the airfield see the plane arrive
+        };
+        case "helicopter": {
+            // Spawn helicopter at parent base, fly to destination
+            // Land, unload, RTB
+        };
+        case "ground_convoy": {
+            // Create convoy profiles at map edge or parent base
+            // Route along roads to destination
+            // Vulnerable to ambush (creates escort mission opportunity)
+        };
+        case "naval": {
+            // Spawn landing craft at map edge (sea)
+            // Navigate to nearest beach/port to destination
+            // Unload on beach
+        };
+        case "paradrop": {
+            // Spawn transport aircraft high altitude
+            // Drop paratroopers over destination
+            // Aircraft RTB
+        };
+    };
+
+    ["atlas_reinforcement_delivering", [_method, _destinationBase, _forceType, _count]]
+        call CBA_fnc_localEvent;
+};
+```
+
+**Events:**
+- `atlas_reinforcement_delivering` — `[method, baseId, forceType, count]`
+- `atlas_reinforcement_arrived` — `[baseId, forceType, count]`
+- `atlas_reinforcement_intercepted` — `[method, pos, lostCount]` (convoy ambushed, aircraft shot down)
+
+---
+
+### 26.10 Web Dashboard Specification
+
+A separate web application that provides out-of-game campaign management. Reads from the PostgreSQL database that ATLAS servers write to.
+
+#### Architecture
+
+```
+┌─────────────────────────────────────────┐
+│           Web Dashboard                  │
+│  (Node.js / Python backend + React UI)   │
+│                                          │
+│  ┌─────────┐  ┌──────────┐  ┌────────┐ │
+│  │ Campaign │  │ Live Map │  │  AAR   │ │
+│  │ Overview │  │ (WebSocket│  │Browser │ │
+│  │          │  │  updates) │  │        │ │
+│  └─────────┘  └──────────┘  └────────┘ │
+│  ┌─────────┐  ┌──────────┐  ┌────────┐ │
+│  │ Player  │  │  Admin   │  │ Stats  │ │
+│  │ Profiles │  │ Controls │  │ Graphs │ │
+│  └─────────┘  └──────────┘  └────────┘ │
+└──────────────────┬──────────────────────┘
+                   │ SQL queries
+                   ▼
+          ┌────────────────┐
+          │  PostgreSQL DB  │
+          │  (shared with   │
+          │   ATLAS servers)│
+          └────────────────┘
+```
+
+#### Dashboard Pages
+
+| Page | Content |
+|------|---------|
+| **Campaign Overview** | Theater status: servers online, total forces, territory control %, frontline summary |
+| **Live Map** | Real-time map showing all servers' force positions, objectives, frontlines, bases (updates via polling DB) |
+| **Server Detail** | Per-server view: force breakdown, OPCOM state, active missions, supply chain |
+| **Player Profiles** | Per-player: statistics, missions completed, ROE violations, session history |
+| **AAR Browser** | Browse past session AARs: timeline, map replay, statistics |
+| **Base Network** | Supply chain visualization: base hierarchy, supply levels, route status |
+| **Intel Board** | Current intel picture: known enemy positions, confidence levels, stale data |
+| **Statistics** | Graphs: casualties over time, territory control over time, H&M progression, supply consumption |
+| **Admin Panel** | Push events to servers, modify reinforcement pool, trigger saves, adjust settings |
+
+#### Tech Stack (Recommended)
+
+```
+Backend:  Node.js + Express (or Python + FastAPI)
+Database: PostgreSQL (already defined in §11.5)
+Frontend: React + Leaflet (map rendering) + Chart.js (statistics)
+Updates:  Backend polls PostgreSQL every 5-10s, pushes to frontend via WebSocket
+Auth:     Simple API key or session-based (admin functions require auth)
+Deploy:   Docker container for easy self-hosting
+```
+
+This is a **separate repository/project** that shares the PostgreSQL database with ATLAS servers. It reads the same tables defined in §11.5 and adds:
+
+```sql
+-- Additional tables for web dashboard
+CREATE TABLE aar_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    server_id VARCHAR(64),
+    session_start TIMESTAMPTZ,
+    session_end TIMESTAMPTZ,
+    duration_seconds INTEGER,
+    report JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE player_statistics (
+    player_uid VARCHAR(64),
+    session_id BIGINT REFERENCES aar_sessions(id),
+    kills INTEGER DEFAULT 0,
+    deaths INTEGER DEFAULT 0,
+    missions_completed INTEGER DEFAULT 0,
+    roe_violations INTEGER DEFAULT 0,
+    distance_traveled FLOAT DEFAULT 0,
+    time_played INTEGER DEFAULT 0,
+    PRIMARY KEY (player_uid, session_id)
+);
+```
+
+---
+
+### 26.11 New Module: `atlas_compat_zeus`
+
+Zeus integration requires its own optional PBO (17th module):
+
+```
+atlas_compat_zeus/
+  config.cpp
+  CfgEventHandlers.hpp
+  CfgFunctions.hpp
+  XEH_preInit.sqf
+  XEH_postInit.sqf
+  fnc/
+    fn_init.sqf
+    fn_moduleSpawnProfile.sqf
+    fn_moduleIssueOrder.sqf
+    fn_moduleCreateObjective.sqf
+    fn_moduleEstablishBase.sqf
+    fn_moduleTriggerEvent.sqf
+    fn_modulePlaceIED.sqf
+    fn_moduleAdjustMorale.sqf
+    fn_moduleChangeROE.sqf
+    fn_moduleForceReeval.sqf
+    fn_moduleGenerateMission.sqf
+    fn_moduleAdjustHostility.sqf
+    fn_moduleSpawnEncounter.sqf
+    fn_moduleAdjustSupply.sqf
+    fn_moduleSetDiplomacy.sqf
+    fn_moduleWeatherOverride.sqf
+```
+
+This brings the total PBO count to **18** (16 core + `atlas_compat_ace` + `atlas_compat_zeus`).
 
 ---
 
