@@ -34,6 +34,7 @@
 24. [Feature Parity Gap Analysis](#24-gap-analysis)
 25. [Visual Assets & Icon Specification](#25-visual-assets)
 26. [Advanced Simulation Systems](#26-advanced-simulation)
+27. [Performance Budget & Scaling](#27-performance-budget)
 
 ---
 
@@ -5859,6 +5860,650 @@ atlas_compat_zeus/
 ```
 
 This brings the total PBO count to **18** (16 core + `atlas_compat_ace` + `atlas_compat_zeus`).
+
+---
+
+## 27. Performance Budget & Scaling
+
+### 27.1 Target Scenarios
+
+All performance design works backward from the hardest scenario. Every system must fit within its frame budget at Tier 1. Lighter scenarios get headroom.
+
+| Tier | Profiles | Spawned AI | Players | HCs | Server Type | Map |
+|------|----------|-----------|---------|-----|-------------|-----|
+| **Tier 1 (Max)** | 2000+ | 500 | 40 | 3-4 | Dedicated | Altis (30km) |
+| **Tier 2 (Large)** | 1000 | 250 | 20 | 1-2 | Dedicated | Altis |
+| **Tier 3 (Medium)** | 500 | 100 | 10 | 0-1 | Dedicated | Stratis/medium |
+| **Tier 4 (Small)** | 200 | 50 | 4 | 0 | Listen Server | Any |
+| **Tier 5 (SP)** | 100 | 30 | 1 | 0 | Single Player | Any |
+
+### 27.2 Arma 3 Engine Constraints
+
+These are hard facts about Arma 3's execution model:
+
+```
+SERVER (dedicated):
+  Frame rate target: 50 FPS server (20ms per frame)
+  Scheduled time slice: ~3ms per frame shared across ALL scheduled scripts
+  Unscheduled: runs to completion within the frame — must be FAST
+  publicVariable: ~0.5ms per broadcast (avoid spamming)
+  createVehicle: ~2-5ms per call (expensive)
+  deleteVehicle: ~0.5-1ms per call
+  setGroupOwner: ~0.5ms per call (HC transfer)
+  forEach on 1000 items: ~0.5ms (empty loop) to 5ms+ (with work per item)
+  HashMap get: ~0.002ms per lookup
+  HashMap forEach (1000 entries): ~0.8ms
+
+HEADLESS CLIENT:
+  Runs AI simulation only — no rendering
+  Can handle ~150-200 AI groups before degrading
+  Each HC effectively doubles AI capacity
+  With 3 HCs: server + 3 HCs = ~600-800 AI groups total capacity
+
+CLIENT (player):
+  Frame rate target: 30+ FPS
+  Local scripts compete with rendering
+  Minimize client-side computation — server does the heavy lifting
+```
+
+### 27.3 Frame Budget Allocation
+
+At Tier 1 (worst case), the server has **20ms per frame**. Arma's own engine uses most of this. We target **3ms total for all ATLAS unscheduled work per frame**, with scheduled work stealing time from the 3ms scheduled slice.
+
+```
+ATLAS Server Frame Budget (per frame, unscheduled):
+┌─────────────────────────────────────────────────────────────┐
+│ Total ATLAS budget: 3.0ms per frame                          │
+│                                                               │
+│ Player cell tracking          0.10ms   (40 players × distance check)
+│ Profile spawn/despawn eval    0.30ms   (triggered by cell change only)
+│ Virtual movement (PFH chunk)  0.40ms   (move 10-20 profiles/frame)
+│ Morale update (PFH chunk)     0.15ms   (evaluate 5 profiles/frame)
+│ CQB evaluation                0.10ms   (only on cell change events)
+│ Civilian spawn/despawn        0.15ms   (pool get/return, 2-3/frame)
+│ Civilian behavior FSM         0.10ms   (transition 2 civilians/frame)
+│ GC processing                 0.08ms   (delete 2-3 corpses/frame)
+│ Logistics monitor             0.05ms   (check 1 convoy/frame)
+│ Air mission monitor           0.05ms   (check 1 mission/frame)
+│ Frontline (amortized)         0.10ms   (update 10 cells/frame)
+│ Weather check                 0.02ms   (once every 60 frames)
+│ HC load tracking              0.02ms   (once every 30s)
+│ Base supply consumption       0.05ms   (once every 60s, spread across frames)
+│ Intel decay                   0.03ms   (process 2 entries/frame)
+│ Detection system              0.05ms   (1 player check/frame, rotated)
+│ SIGINT checks                 0.02ms   (event-driven, rare)
+│ Morale contagion              0.05ms   (spatial grid query, 3 profiles/frame)
+│ AAR recording                 0.02ms   (array pushBack, event-driven)
+│ Event bus overhead            0.10ms   (CBA event dispatch)
+│ Grid maintenance              0.06ms   (moves, inserts from above systems)
+│ Adaptive performance check    0.02ms   (once per second)
+│ Buffer / headroom             1.00ms   (safety margin for spikes)
+│                                                               │
+│ TOTAL                         3.00ms                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+```
+ATLAS Scheduled Budget (steals from ~3ms scheduled slice per frame):
+┌─────────────────────────────────────────────────────────────┐
+│ Scheduled scripts share the slice. Only ONE heavy system     │
+│ runs per cycle. They yield every N iterations.               │
+│                                                               │
+│ OPCOM cycle (every 60s)       ~50-200ms total                │
+│   Spread across many frames at 3ms/frame = 17-67 frames      │
+│   During OPCOM cycle, other scheduled work pauses             │
+│                                                               │
+│ Persistence save (every 300s) ~100-500ms total               │
+│   Only dirty profiles, chunked 50/yield                       │
+│   At 2000 profiles, ~10% dirty = 200 profiles = 4 yields     │
+│                                                               │
+│ Road graph build (once)       ~2000-5000ms total             │
+│   Runs at mission start only, before gameplay                 │
+│   Altis: ~15,000 road segments, A* graph build               │
+│                                                               │
+│ Sector analysis (once)        ~3000-8000ms total             │
+│   Runs at mission start only                                  │
+│   Altis 500m grid: 3,600 cells, ~2ms per cell                │
+│                                                               │
+│ Placement (once)              ~1000-3000ms total             │
+│   Creating 2000 profiles at startup                           │
+│   ~1ms per profile creation (HashMap + grid insert)           │
+│                                                               │
+│ Frontline full recalc (every 120s) ~50-150ms total           │
+│   Influence from objectives + forces + bases                  │
+│   3,600 cells × multiple influence sources                    │
+│   Chunked: 100 cells per yield                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 27.4 Per-System Cost Analysis at Tier 1
+
+#### Spatial Grid (atlas_core)
+
+```
+Grid cells on Altis (500m): 3,600
+Entities indexed: ~2000 profiles + ~50 objectives + ~500 buildings + ~100 IEDs + ~50 civilians = ~2,700
+
+Grid insert: 1 HashMap get + 1 array pushBack = ~0.005ms
+Grid query (1500m radius = 3x3 cells): 9 HashMap gets + array concatenation = ~0.03ms
+Grid move: 1 remove + 1 insert = ~0.01ms
+
+Per frame at Tier 1 (10-20 virtual moves + 0-2 spawns):
+  20 moves × 0.01ms = 0.2ms  ← fits in virtual movement budget
+  2 spawns × 0.03ms = 0.06ms ← fits in spawn/despawn budget
+```
+
+**Verdict: No problem.** Grid operations are O(1) per operation.
+
+#### Profile Registry (atlas_profile)
+
+```
+2000 profiles in HashMap
+Registry get: ~0.002ms per lookup
+Registry forEach: ~1.6ms for full iteration (2000 entries)
+
+NEVER iterate the full registry in unscheduled code.
+Always use spatial grid to find relevant profiles.
+Full iteration only in scheduled OPCOM/persistence code.
+```
+
+**Rule: No function may iterate ATLAS_profileRegistry in unscheduled code.**
+
+#### Virtual Movement (atlas_profile)
+
+```
+2000 profiles, ~1500 are virtual and moving (500 are spawned)
+Each virtual move step: ~0.02ms (position math + grid check)
+
+Processing ALL 1500 per frame: 1500 × 0.02ms = 30ms ← WAY TOO EXPENSIVE
+
+Solution: chunk processing via PFH
+  Budget: 0.4ms per frame
+  Profiles per frame: 0.4ms / 0.02ms = 20 profiles per frame
+  Full pass through 1500 profiles: 1500 / 20 = 75 frames = ~1.5s at 50fps
+
+  This means each virtual profile updates position every ~1.5 seconds.
+  At infantry speed (5 km/h = 1.4 m/s), movement error is ~2.1m per update.
+  At vehicle speed (60 km/h = 16.7 m/s), movement error is ~25m per update.
+
+  Acceptable — virtual profiles don't need sub-meter precision.
+  When spawned, real AI takes over at exact position.
+```
+
+**CBA Setting: `ATLAS_virtualMoveBudget`** — profiles per frame (default 20, range 5-50). Higher = smoother virtual movement, more CPU cost.
+
+#### Spawn/Despawn (atlas_profile)
+
+```
+createGroup + createVehicleCrew or createUnit: ~2-5ms per unit
+A typical profile has 4-8 units → 8-40ms to spawn one profile
+
+This is the most expensive operation in ATLAS.
+At Tier 1 with 40 players, worst case: player drives fast, crosses multiple cells
+  → triggers spawn eval for ~10 nearby profiles
+  → 3-5 actually need spawning → 24-200ms total
+
+Solutions:
+1. Spawn maximum 1 profile per frame (spread across frames)
+2. Queue spawn requests, process one per frame
+3. Profile spawn queue with priority (nearest to player first)
+4. Pre-spawn: when player is heading toward profiles, start spawning early
+```
+
+```sqf
+// Spawn queue — never spawn more than 1 group per frame
+ATLAS_spawnQueue = [];  // Priority queue: [distance, profileId]
+
+// PFH: process top of spawn queue (1 per frame max)
+[{
+    if (ATLAS_spawnQueue isEqualTo []) exitWith {};
+
+    // Sort by distance (closest first) — do this rarely, not every frame
+    if (diag_tickTime > ATLAS_nextSpawnSort) then {
+        ATLAS_spawnQueue sort true;
+        ATLAS_nextSpawnSort = diag_tickTime + 1;
+    };
+
+    private _entry = ATLAS_spawnQueue deleteAt 0;
+    _entry params ["_dist", "_profileId"];
+    private _profile = ATLAS_profileRegistry get _profileId;
+    if (!isNil "_profile" && _profile get "state" == "virtual") then {
+        [_profile] call ATLAS_fnc_profile_spawn;
+    };
+}, 0] call CBA_fnc_addPerFrameHandler;
+```
+
+**Frame cost: 2-5ms for one spawn per frame (acceptable — Arma already hiccups from createUnit).**
+
+At 50fps, spawning 500 profiles takes 500 frames = 10 seconds. But this only happens on initial mission start (all profiles start virtual, spawn as players approach). Steady-state spawn rate is much lower.
+
+#### HC Distribution (atlas_core)
+
+```
+setGroupOwner: ~0.5ms per call
+After spawning 1 profile (1 group): 1 × 0.5ms = 0.5ms
+
+With 3 HCs, load tracking: 1 HashMap iteration of 3 entries = negligible
+Rebalancing: iterate profiles looking for overloaded HC groups
+  Spatial grid doesn't help here — need to check _hcOwner field
+  Solution: maintain a secondary index: HC → Array<profileId>
+  Then rebalance is O(groups_to_move), not O(all_profiles)
+```
+
+#### OPCOM (atlas_opcom)
+
+```
+Tier 1: 2 OPCOMs (BLUFOR + OPFOR), each managing ~1000 profiles and ~50 objectives
+
+ASSESS phase:
+  Count forces: iterate own profiles (1000) → ~0.8ms in scheduled
+  Assess threats: iterate objectives (50) × grid query each → 50 × 0.03ms = 1.5ms
+  Total ASSESS: ~3ms, fits in 1 scheduled frame
+
+PLAN phase:
+  Score objectives: 50 objectives, but only ~10 dirty → 10 × 0.5ms scoring = 5ms
+  Allocate forces: sort + assign → ~3ms
+  Total PLAN: ~8ms, fits in 3 scheduled frames
+
+EXECUTE phase:
+  Issue orders: ~10 orders × event fire = ~0.5ms (unscheduled)
+
+MONITOR phase:
+  Check orders: ~30 active orders, 5 per frame = 0.15ms/frame (unscheduled)
+
+Full OPCOM cycle: ~12ms total, spread across ~5-10 frames
+With 2 OPCOMs alternating: one OPCOM per 60s cycle, never both at once
+
+Cycle time at Tier 1: 60-120 seconds (CBA Setting)
+```
+
+**Verdict: OPCOM is fine.** Dirty-flag optimization means steady-state is much cheaper than worst case.
+
+#### Frontline / Influence Map (atlas_core)
+
+```
+Grid cells on Altis (500m): 3,600
+Influence sources: ~50 objectives + ~20 bases + ~2000 profiles + 40 players = ~2,110
+
+NAIVE: For each cell, sum influence from all sources → 3,600 × 2,110 = 7.6M operations ← IMPOSSIBLE
+
+SMART: For each source, project influence to nearby cells only
+  Each source affects cells within influence radius (e.g., 2000m = 4x4 = 16 cells)
+  2,110 sources × 16 cells = 33,760 operations × ~0.005ms = ~170ms
+
+  Still too much for unscheduled. Run SCHEDULED, chunked:
+  Process 200 sources per yield → ~11 yields → ~170ms over 11 frames = ~15ms/frame
+
+  Recalculate every 120 seconds → 170ms amortized = negligible
+
+SMARTER: Don't recalculate from scratch. Incremental update:
+  Only recalculate influence for sources that moved since last update.
+  At steady state, ~100-200 profiles moved per cycle → ~32ms
+  Objectives/bases rarely change → skip
+
+  Even smarter: separate grid for objectives+bases (slow-changing)
+  and profiles (fast-changing). Combine at read time.
+```
+
+```sqf
+// Two-layer influence map
+ATLAS_influenceStatic = createHashMap;   // From objectives + bases (recalc every 120s)
+ATLAS_influenceDynamic = createHashMap;  // From profiles + players (recalc every 30s)
+
+// Read: combine both layers
+ATLAS_fnc_frontline_getInfluence = {
+    params ["_cellKey"];
+    private _static = ATLAS_influenceStatic getOrDefault [_cellKey, createHashMap];
+    private _dynamic = ATLAS_influenceDynamic getOrDefault [_cellKey, createHashMap];
+    // Merge: add values per side
+    private _result = +_static;  // copy
+    { _result set [_x, (_result getOrDefault [_x, 0]) + _y] } forEach _dynamic;
+    _result
+};
+```
+
+**Verdict: Feasible with two-layer approach and scheduled recalculation.**
+
+#### Persistence Save (atlas_persist)
+
+```
+2000 profiles, ~10% dirty per save = 200 profiles
+Serialize 1 profile: ~0.1ms (HashMap → array conversion)
+Write to PNS: ~0.05ms per profileNamespace setVariable
+
+200 profiles × 0.15ms = 30ms total
+Chunked at 50 per yield: 4 yields → 30ms over 4 frames
+
+PostgreSQL write (async via extension):
+  Aggregate data only (force counts, objectives) = small payload
+  Extension handles async — zero frame cost after initial callExtension (~0.1ms)
+
+Save cycle every 300s → negligible amortized cost
+```
+
+**Verdict: No problem.**
+
+#### Civilian System (atlas_civilian)
+
+```
+Max agents active: configurable, default 20 per player nearby area
+At Tier 1 with 40 players: theoretical max ~800 agents
+But agents only spawn near players, and player clusters overlap
+Realistic max: ~100-200 active civilian agents
+
+Agent pool get/return: ~0.02ms per operation (setPos, enableSimulation)
+Behavior FSM transition: ~0.05ms per civilian
+Budget: 2-3 civilians per frame → 0.15ms
+
+The real cost is the Arma AI itself for 200 civilian agents.
+Solution: civilians are AGENTS (createAgent), not full AI units.
+Agents have minimal AI — no pathfinding, no combat, just animation + simple moveTO.
+Agent CPU cost is ~10% of a full AI unit.
+200 agents ≈ 20 full AI units in CPU terms → manageable.
+```
+
+#### Hearts & Minds, Encounters, CASEVAC
+
+```
+Stability update: HashMap set on event → ~0.002ms per event (negligible)
+Encounter spawn: 1 createAgent + setup → ~3ms (rare, 1-2 per player area)
+CASEVAC: event-driven, uses existing logistics pipeline → no additional per-frame cost
+```
+
+#### Morale System
+
+```
+2000 profiles × morale evaluation:
+  Each evaluation: ~5 HashMap reads + math = ~0.015ms
+  All profiles: 2000 × 0.015ms = 30ms ← too expensive per frame
+
+Budget: 5 profiles per frame → 0.075ms
+Full pass: 2000 / 5 = 400 frames = 8 seconds at 50fps
+  Morale updates every ~8 seconds per profile → acceptable
+  Combat situations already trigger instant morale events for involved profiles
+
+Contagion: spatial grid query per evaluated profile
+  1 grid query = 0.03ms → 5 × 0.03ms = 0.15ms per frame → acceptable
+```
+
+#### Detection System
+
+```
+Only applies to players (not AI), only when detection is enabled
+40 players, rotate 1 per frame: 40 frames per full pass = 0.8s per player
+Each evaluation: ~0.05ms (gear checks, zone checks) → negligible
+```
+
+### 27.5 Spawned AI Budget and HC Distribution
+
+This is the most critical performance constraint. **Arma 3's biggest bottleneck is AI simulation, not ATLAS code.**
+
+```
+AI performance characteristics:
+  Each AI group: ~0.5-2ms of server CPU per frame (pathfinding, decisions, perception)
+  500 spawned AI in ~80-100 groups: 40-200ms per frame ← DESTROYS server FPS
+
+  Server alone can handle: ~30-50 AI groups before FPS degrades below 30fps
+
+  With HCs:
+    Server: 0 AI groups (all transferred to HCs)
+    HC 1: ~40-50 groups (125-170 AI)
+    HC 2: ~40-50 groups (125-170 AI)
+    HC 3: ~40-50 groups (125-170 AI)
+    Total: 120-150 groups = 375-500 AI ← matches Tier 1 target
+
+  CRITICAL: Server should retain ZERO AI groups when HCs are available.
+  Only groups that fail transfer eligibility (player-led, mid-combat near player) stay.
+```
+
+```sqf
+// HC capacity tracking with max group limits
+ATLAS_hcMaxGroupsPerHC = 50;  // CBA Setting, default 50
+
+ATLAS_fnc_hc_canAccept = {
+    params ["_hcClientOwner"];
+    private _hcData = ATLAS_hcClients get (str _hcClientOwner);
+    (_hcData get "groupCount") < ATLAS_hcMaxGroupsPerHC
+};
+
+// If ALL HCs are at capacity, don't spawn more profiles
+// Queue them until an HC has room (groups despawn as players move away)
+ATLAS_fnc_profile_canSpawn = {
+    if (!ATLAS_hcAvailable) exitWith { true };  // No HCs = spawn on server (limited)
+
+    // Check if any HC has room
+    private _hasRoom = false;
+    { if ([_y get "clientOwner"] call ATLAS_fnc_hc_canAccept) exitWith { _hasRoom = true } } forEach ATLAS_hcClients;
+    _hasRoom
+};
+```
+
+### 27.6 Scaling Rules by Tier
+
+| System | Tier 1 (2000/500/40) | Tier 2 (1000/250/20) | Tier 3 (500/100/10) | Tier 4 (200/50/4) | Tier 5 SP (100/30/1) |
+|--------|---------------------|---------------------|--------------------|--------------------|---------------------|
+| **Virtual move/frame** | 20 profiles | 15 profiles | 10 profiles | 10 profiles | 5 profiles |
+| **Morale eval/frame** | 5 profiles | 5 profiles | 3 profiles | 3 profiles | 2 profiles |
+| **Spawn queue rate** | 1/frame | 1/frame | 1/frame | 2/frame | 2/frame |
+| **OPCOM cycle** | 120s | 90s | 60s | 60s | 30s |
+| **Frontline recalc** | 120s | 90s | 60s | 60s | 30s |
+| **Max spawned groups** | 150 (across HCs) | 80 (across HCs) | 50 (server+HC) | 30 (server) | 20 (server) |
+| **Max civ agents** | 200 (pooled) | 100 (pooled) | 60 (pooled) | 30 (pooled) | 15 (pooled) |
+| **Persistence interval** | 300s | 300s | 300s | 300s | 300s |
+| **Influence grid** | 500m cells | 500m cells | 500m cells | 1000m cells | 1000m cells |
+| **HC requirement** | 3-4 HCs | 1-2 HCs | 0-1 HC | None | N/A |
+
+### 27.7 Auto-Scaling System
+
+ATLAS automatically adjusts its per-frame budgets based on measured server FPS:
+
+```sqf
+// Master performance governor — runs every 1 second
+ATLAS_fnc_perf_governor = {
+    private _fps = diag_fps;
+    private _target = ATLAS_setting_fpsTarget;  // CBA Setting, default 40 for server
+
+    // Calculate load factor (1.0 = at target, >1.0 = overloaded, <1.0 = headroom)
+    private _loadFactor = _target / (_fps max 1);
+
+    if (_loadFactor > 1.3) then {
+        // OVERLOADED: reduce everything
+        ATLAS_perfMode = "degraded";
+        ATLAS_virtualMoveBudget = (ATLAS_virtualMoveBudget - 2) max 3;
+        ATLAS_moraleBudget = (ATLAS_moraleBudget - 1) max 1;
+        ATLAS_maxCivAgents = (ATLAS_maxCivAgents - 5) max 10;
+        ATLAS_despawnRadius = (ATLAS_despawnRadius - 100) max (ATLAS_spawnRadius + 100);
+
+        // If still overloaded after 30s, force-despawn furthest groups
+        if (ATLAS_overloadedSince + 30 < serverTime) then {
+            call ATLAS_fnc_perf_emergencyDespawn;
+        };
+
+        diag_log format ["[ATLAS][PERF] DEGRADED: FPS %1 (target %2), load %3",
+            _fps, _target, _loadFactor];
+    };
+
+    if (_loadFactor > 1.1) then {
+        // STRESSED: gentle reduction
+        ATLAS_perfMode = "stressed";
+        ATLAS_virtualMoveBudget = (ATLAS_virtualMoveBudget - 1) max 5;
+    };
+
+    if (_loadFactor < 0.8) then {
+        // HEADROOM: restore budgets toward defaults
+        ATLAS_perfMode = "normal";
+        ATLAS_virtualMoveBudget = (ATLAS_virtualMoveBudget + 1) min ATLAS_setting_virtualMoveBudget;
+        ATLAS_moraleBudget = (ATLAS_moraleBudget + 1) min 5;
+        ATLAS_maxCivAgents = (ATLAS_maxCivAgents + 2) min ATLAS_setting_maxCivAgents;
+        ATLAS_despawnRadius = (ATLAS_despawnRadius + 50) min (ATLAS_setting_spawnDistance + ATLAS_setting_despawnBuffer);
+    };
+};
+```
+
+#### Emergency Despawn
+
+When the server is critically overloaded (FPS < 50% of target for 30+ seconds), force-despawn groups furthest from all players:
+
+```sqf
+ATLAS_fnc_perf_emergencyDespawn = {
+    // Find spawned profiles sorted by distance to nearest player (furthest first)
+    private _candidates = [];
+    {
+        private _profile = _y;
+        if (_profile get "state" == "spawned") then {
+            private _pos = _profile get "pos";
+            private _minDist = 1e10;
+            { _minDist = _minDist min (_pos distance getPosATL _x) } forEach allPlayers;
+            _candidates pushBack [_minDist, _x];
+        };
+    } forEach ATLAS_profileRegistry;
+
+    _candidates sort false;  // Descending — furthest first
+
+    // Despawn up to 10 groups
+    private _despawned = 0;
+    {
+        _x params ["_dist", "_profileId"];
+        if (_dist > ATLAS_spawnRadius) then {
+            [ATLAS_profileRegistry get _profileId] call ATLAS_fnc_profile_despawn;
+            _despawned = _despawned + 1;
+        };
+        if (_despawned >= 10) exitWith {};
+    } forEach _candidates;
+
+    diag_log format ["[ATLAS][PERF] Emergency despawn: %1 groups", _despawned];
+};
+```
+
+### 27.8 Extension Offload Candidates
+
+Some computation can be moved to the `atlas_db` extension DLL (C++/Rust runs on a background thread, not in Arma's frame):
+
+| Computation | SQF Cost | Extension Cost | Candidate? |
+|------------|---------|---------------|-----------|
+| Road graph A* pathfinding | 2-10ms per query | <0.1ms | **Yes — high value** |
+| Influence map calculation | 50-170ms per recalc | <5ms | **Yes — high value** |
+| Frontline contour extraction | 20-50ms | <2ms | **Yes** |
+| Profile serialization (JSON) | 0.1ms per profile | <0.01ms per profile | **Yes for bulk save** |
+| Morale calculation (batch) | 30ms for 2000 | <1ms | Maybe — low priority |
+| Road graph build | 2000-5000ms | <200ms | **Yes — mission start** |
+
+**Extension architecture for compute offload:**
+
+```sqf
+// Pathfinding via extension (async)
+_callId = "atlas_db" callExtension ["PATHFIND", format ["%1|%2|%3", _startPos, _endPos, _vehicleType]];
+// Result arrives via callback event with waypoint array
+
+// Influence map via extension (async)
+_callId = "atlas_db" callExtension ["INFLUENCE_CALC", _sourceDataSerialized];
+// Result arrives via callback with cell influence values
+```
+
+This means the extension DLL isn't just for PostgreSQL — it's also a **compute offload engine** for any heavy calculation. The DLL runs on its own thread, keeping Arma's frame clean.
+
+### 27.9 Memory Budget
+
+```
+Arma 3 SQF memory considerations:
+  Each HashMap entry: ~100-200 bytes (key string + value)
+  Each profile HashMap: ~30 keys × 150 bytes = ~4.5KB
+  2000 profiles: ~9MB ← fine
+  Spatial grid: 3,600 cells × ~500 bytes = ~1.8MB ← fine
+  Road graph: 15,000 segments × ~200 bytes = ~3MB ← fine
+  Influence map: 3,600 cells × 2 layers × ~100 bytes = ~0.7MB ← fine
+  Intel registry: ~200 entries × ~500 bytes = ~0.1MB ← fine
+  AAR timeline: ~1000 events × ~200 bytes = ~0.2MB ← fine
+
+  Total ATLAS memory: ~15-20MB ← well within Arma's 2GB+ available memory
+```
+
+### 27.10 Startup Performance
+
+Mission start is the slowest phase. Target: **under 60 seconds** for Tier 1 on Altis.
+
+```
+Startup sequence with estimated times (Tier 1, Altis):
+
+Phase 0: atlas_core
+  CBA Settings init:         ~50ms
+  Spatial grid init:         ~10ms
+  Road graph build:          ~3000ms (SCHEDULED, or extension offload ~200ms)
+  Sector analysis:           ~5000ms (SCHEDULED, 3600 cells × ~1.5ms each)
+  Auto-detect objectives:    ~500ms (from sector data)
+  Module discovery:          ~100ms
+  HC manager init:           ~10ms
+  Phase 0 total:            ~8.7s (SQF) or ~5.9s (with extension offload)
+
+Phase 1: atlas_persist
+  PNS load check:           ~100ms
+  Load profiles (if saved): ~2000ms (2000 profiles × ~1ms deserialize, SCHEDULED)
+  PostgreSQL connect:        ~500ms (extension DLL init + handshake)
+  Phase 1 total:            ~2.6s
+
+Phase 2: atlas_profile + atlas_placement
+  Profile registry init:    ~10ms
+  Create 2000 profiles:     ~2000ms (SCHEDULED, if no persistence data)
+  Phase 2 total:            ~2s
+
+Phase 3: atlas_opcom + atlas_logistics + atlas_air + atlas_cqb + atlas_civilian
+  OPCOM init:               ~100ms (state machine setup)
+  CQB building scan:        ~3000ms (SCHEDULED, scan all buildings in objective areas)
+  Civilian density calc:    ~1000ms (SCHEDULED, from sector data)
+  Others:                   ~200ms
+  Phase 3 total:            ~4.3s
+
+Phase 4: atlas_asymmetric + atlas_support
+  ~500ms
+
+Phase 5: atlas_c2 + utilities
+  ~200ms
+
+TOTAL STARTUP: ~18.3s (SQF) or ~15.5s (with extension offload)
+```
+
+**Well under the 60-second target.** Players see a loading screen during this time. Each phase can display progress messages.
+
+### 27.11 Performance CBA Settings
+
+```
+ATLAS - Performance
+  ├── Server FPS Target           [20-60, default 40]                (runtime tunable)
+  ├── Virtual Move Budget         [3-50 profiles/frame, default 20]  (runtime tunable)
+  ├── Morale Eval Budget          [1-10 profiles/frame, default 5]   (runtime tunable)
+  ├── Spawn Queue Rate            [1-3 per frame, default 1]         (runtime tunable)
+  ├── Max Spawned Groups (server) [10-60, default 50]                (runtime tunable)
+  ├── Max Spawned Groups (per HC) [20-80, default 50]                (runtime tunable)
+  ├── Max Civilian Agents         [5-200, default 100]               (runtime tunable)
+  ├── OPCOM Cycle Time            [30-300s, default 90]              (runtime tunable)
+  ├── Frontline Recalc Interval   [30-300s, default 120]             (runtime tunable)
+  ├── Influence Grid Cell Size    [250-1000m, default 500]           (mission setting)
+  ├── Auto-Scaling                [Yes / No, default Yes]            (mission setting)
+  ├── Extension Compute Offload   [Yes / No, default Yes if DLL]    (mission setting)
+  ├── Emergency Despawn           [Yes / No, default Yes]            (runtime tunable)
+  ├── GC Corpses Per Frame        [1-10, default 3]                  (runtime tunable)
+  └── Debug Performance Overlay   [Yes / No, default No]             (runtime tunable)
+```
+
+### 27.12 Performance Monitoring
+
+Built-in performance overlay for admins (debug mode):
+
+```sqf
+// Performance overlay shows:
+// - Server FPS
+// - ATLAS frame time (total ms per frame)
+// - Per-system breakdown (top 5 consumers)
+// - Profile count (virtual / spawned / total)
+// - Spawned AI groups (server / per-HC)
+// - Spawn queue depth
+// - OPCOM cycle status
+// - Perf mode (normal / stressed / degraded)
+// - Memory estimate
+
+// Implementation: lightweight PFH collecting diag_tickTime deltas
+// Display: text overlay on admin's screen (ctrlCreate "RscStructuredText")
+```
 
 ---
 
