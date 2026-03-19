@@ -35,6 +35,8 @@
 25. [Visual Assets & Icon Specification](#25-visual-assets)
 26. [Advanced Simulation Systems](#26-advanced-simulation)
 27. [Performance Budget & Scaling](#27-performance-budget)
+28. [Combined Arms, Infrastructure & Operational Systems](#28-combined-arms)
+29. [Mod API & Extension Points](#29-mod-api)
 
 ---
 
@@ -6504,6 +6506,999 @@ Built-in performance overlay for admins (debug mode):
 // Implementation: lightweight PFH collecting diag_tickTime deltas
 // Display: text overlay on admin's screen (ctrlCreate "RscStructuredText")
 ```
+
+---
+
+## 28. Combined Arms, Infrastructure & Operational Systems
+
+### 28.1 Combined Arms Doctrine for OPCOM
+
+OPCOM doesn't just allocate forces — it composes **task forces** from multiple arms and sequences operations.
+
+#### Task Force Composition
+
+```sqf
+// Before ordering an attack, OPCOM assembles a task force
+// matching the objective's characteristics
+
+ATLAS_fnc_opcom_composeTaskForce = {
+    params ["_opcom", "_objective", "_orderType"];
+
+    private _terrain = _objective getOrDefault ["terrainType", "open"];
+    private _enemyStrength = [_objective] call ATLAS_fnc_opcom_estimateEnemyStrength;
+    private _availableProfiles = [_opcom] call ATLAS_fnc_opcom_getAvailableProfiles;
+
+    // Composition rules based on terrain and mission
+    private _composition = switch (_terrain) do {
+        case "urban": {
+            // Urban: infantry-heavy, armor in support, no air CAS (collateral risk)
+            createHashMapFromArray [
+                ["infantry", 0.60], ["mechanized", 0.20], ["armor", 0.10],
+                ["recon", 0.10], ["air", 0]
+            ]
+        };
+        case "open": {
+            // Open terrain: armor-heavy with mechanized infantry, CAS available
+            createHashMapFromArray [
+                ["infantry", 0.15], ["mechanized", 0.25], ["armor", 0.35],
+                ["recon", 0.05], ["air", 0.20]
+            ]
+        };
+        case "forest": {
+            // Forest: infantry with light vehicles, limited armor
+            createHashMapFromArray [
+                ["infantry", 0.55], ["motorized", 0.25], ["armor", 0.05],
+                ["recon", 0.15], ["air", 0]
+            ]
+        };
+        case "coastal": {
+            // Coastal: combined with naval support
+            createHashMapFromArray [
+                ["infantry", 0.40], ["mechanized", 0.20], ["armor", 0.10],
+                ["naval", 0.10], ["air", 0.20]
+            ]
+        };
+        default {
+            createHashMapFromArray [
+                ["infantry", 0.40], ["mechanized", 0.20], ["armor", 0.20],
+                ["recon", 0.10], ["air", 0.10]
+            ]
+        };
+    };
+
+    // Assemble task force from available profiles matching composition
+    private _taskForce = createHashMapFromArray [
+        ["profiles", []],
+        ["composition", _composition],
+        ["totalStrength", 0],
+        ["hasRecon", false],
+        ["hasArmor", false],
+        ["hasAir", false]
+    ];
+
+    // Fill each type from available pool
+    {
+        private _type = _x;
+        private _ratio = _y;
+        private _needed = ceil (_enemyStrength * 1.5 * _ratio); // 1.5:1 force ratio
+        private _candidates = _availableProfiles select { _x get "type" == _type };
+        private _assigned = _candidates select [0, _needed min count _candidates];
+        {
+            (_taskForce get "profiles") pushBack (_x get "id");
+            _taskForce set ["totalStrength", (_taskForce get "totalStrength") + 1];
+        } forEach _assigned;
+        if (_type == "recon" && count _assigned > 0) then { _taskForce set ["hasRecon", true] };
+        if (_type == "armor" && count _assigned > 0) then { _taskForce set ["hasArmor", true] };
+        if (_type == "air" && count _assigned > 0) then { _taskForce set ["hasAir", true] };
+    } forEach _composition;
+
+    _taskForce
+};
+```
+
+#### Operation Sequencing
+
+OPCOM sequences operations in phases, not just "everyone go attack":
+
+```sqf
+// Attack operation phases:
+// Phase 1: RECON — send recon profiles to observe objective (if hasRecon)
+//          Wait for intel report. Skip if recent intel exists.
+// Phase 2: SEAD — if air is part of task force AND enemy has AD coverage
+//          Suppress/destroy air defenses first
+// Phase 3: PREP — artillery prep fire on objective (if available)
+//          Duration: 2-5 minutes (configurable)
+// Phase 4: AIR — CAS strike on defensive positions (if hasAir, AD suppressed)
+// Phase 5: ASSAULT — ground forces advance on objective
+//          Armor leads in open terrain, infantry leads in urban
+// Phase 6: SECURE — once captured, transition to DEFEND posture
+//          Resupply request generated automatically
+
+ATLAS_fnc_opcom_sequenceAttack = {
+    params ["_opcom", "_taskForce", "_objective"];
+
+    private _phases = [];
+
+    // Phase 1: Recon (if we have recon AND no fresh intel)
+    if (_taskForce get "hasRecon") then {
+        private _intel = [_objective get "pos", _opcom get "side"] call ATLAS_fnc_intel_getLatest;
+        if (isNil "_intel" || { _intel get "confidence" < 0.5 }) then {
+            _phases pushBack createHashMapFromArray [
+                ["phase", "RECON"], ["profiles", _taskForce get "profiles" select { /* recon type */ }],
+                ["duration", 300], ["waitForIntel", true]
+            ];
+        };
+    };
+
+    // Phase 2: SEAD (if using air AND objective has AD coverage)
+    if (_taskForce get "hasAir") then {
+        private _adThreat = [_objective get "pos"] call ATLAS_fnc_air_getADThreatLevel;
+        if (_adThreat > 0) then {
+            _phases pushBack createHashMapFromArray [
+                ["phase", "SEAD"], ["targetAD", _adThreat],
+                ["duration", 180]
+            ];
+        };
+    };
+
+    // Phase 3: Artillery prep (if batteries available)
+    private _battery = [_objective get "pos", _opcom get "side"]
+        call ATLAS_fnc_support_findBattery;
+    if (!isNil "_battery") then {
+        _phases pushBack createHashMapFromArray [
+            ["phase", "ARTY_PREP"], ["battery", _battery],
+            ["targetPos", _objective get "pos"], ["rounds", 12], ["duration", 120]
+        ];
+    };
+
+    // Phase 4: CAS (if air available and AD suppressed)
+    if (_taskForce get "hasAir") then {
+        _phases pushBack createHashMapFromArray [
+            ["phase", "CAS"], ["targetPos", _objective get "pos"],
+            ["duration", 60]
+        ];
+    };
+
+    // Phase 5: Ground assault
+    _phases pushBack createHashMapFromArray [
+        ["phase", "ASSAULT"],
+        ["profiles", (_taskForce get "profiles") select { /* ground types */ }],
+        ["objective", _objective get "id"]
+    ];
+
+    // Phase 6: Secure and transition
+    _phases pushBack createHashMapFromArray [
+        ["phase", "SECURE"], ["transitionTo", "DEFEND"],
+        ["requestResupply", true]
+    ];
+
+    _phases
+};
+```
+
+#### Synergy Bonuses
+
+When multiple arms operate together, effectiveness increases:
+
+```sqf
+// Combat effectiveness modifier when combined arms are present
+ATLAS_fnc_opcom_combinedArmsBonus = {
+    params ["_taskForce"];
+    private _bonus = 1.0;
+
+    private _types = [];
+    { _types pushBackUnique (_x get "type") }
+        forEach ((_taskForce get "profiles") apply { ATLAS_profileRegistry get _x });
+
+    // Each additional arm type adds a synergy bonus
+    if ("infantry" in _types && "armor" in _types) then { _bonus = _bonus + 0.25 };
+    if ("infantry" in _types && "mechanized" in _types) then { _bonus = _bonus + 0.15 };
+    if (("armor" in _types || "mechanized" in _types) && "air" in _types) then { _bonus = _bonus + 0.20 };
+    if ("recon" in _types) then { _bonus = _bonus + 0.10 };  // Better targeting
+    if ("artillery" in _types) then { _bonus = _bonus + 0.15 }; // Suppression
+
+    // Penalty for single-arm operations
+    if (count _types == 1) then { _bonus = _bonus - 0.15 };
+
+    _bonus
+};
+```
+
+---
+
+### 28.2 Air Defense Network
+
+Air defense creates denial zones that affect all air operations.
+
+#### AD Coverage Map
+
+```sqf
+// Air defense sites tracked in a registry
+ATLAS_adRegistry = createHashMap;  // adId -> HashMap
+
+// AD site HashMap
+{
+    "id": string,
+    "type": "SAM"|"AAA"|"MANPAD"|"SHORAD",
+    "pos": [x,y,z],
+    "side": side,
+    "range": number,           // engagement range in meters
+    "ceiling": number,         // max engagement altitude
+    "profileId": string,       // linked profile (can be destroyed)
+    "active": boolean,         // operational?
+    "detectedBy": side|nil,    // has enemy found this AD site?
+    "suppressedUntil": number  // serverTime when SEAD suppression expires
+}
+
+// AD type characteristics
+// SAM:    range 5000-10000m, ceiling 5000m, lethal to all aircraft
+// AAA:    range 2000-4000m, ceiling 3000m, high volume of fire
+// MANPAD: range 1000-3000m, ceiling 2000m, mobile, hard to detect
+// SHORAD: range 3000-6000m, ceiling 4000m, vehicle-mounted
+```
+
+#### AD Integration with Air Module
+
+```sqf
+// Before assigning aircraft to a mission, check AD threat
+ATLAS_fnc_air_getADThreatLevel = {
+    params ["_targetPos"];
+    private _threat = 0;
+
+    {
+        private _ad = _y;
+        if (_ad get "active" && serverTime > _ad getOrDefault ["suppressedUntil", 0]) then {
+            private _dist = _targetPos distance (_ad get "pos");
+            if (_dist < _ad get "range") then {
+                _threat = _threat + switch (_ad get "type") do {
+                    case "SAM": { 3.0 };
+                    case "AAA": { 2.0 };
+                    case "MANPAD": { 1.5 };
+                    case "SHORAD": { 2.5 };
+                    default { 1.0 };
+                };
+            };
+        };
+    } forEach ATLAS_adRegistry;
+
+    _threat  // 0 = clear, 1-2 = light, 3-5 = medium, 6+ = heavy (no-fly)
+};
+
+// OPCOM air decisions based on AD threat:
+// threat 0:   fly freely, all mission types available
+// threat 1-2: CAS available but aircraft take evasion routes
+// threat 3-5: CAS only after SEAD, helicopters avoid area
+// threat 6+:  no air ops until SEAD reduces threat below 3
+```
+
+#### SEAD Operations
+
+```sqf
+// SEAD mission: suppress or destroy air defenses
+// 1. Identify AD sites in objective area (from intel or detection)
+// 2. Assign SEAD-capable aircraft (anti-radiation missiles, standoff weapons)
+// 3. Strike AD positions
+// 4. Mark sites as "suppressed" for duration (5-15 min)
+// 5. If destroyed (profile killed), remove from AD registry permanently
+
+ATLAS_fnc_air_seadExecute = {
+    params ["_missionId", "_adTargets"];
+    {
+        private _ad = ATLAS_adRegistry get _x;
+        // Suppression: AD is inactive for a duration
+        _ad set ["suppressedUntil", serverTime + 600];  // 10 min suppression
+        ["atlas_air_adSuppressed", [_x, _ad get "pos"]] call CBA_fnc_localEvent;
+    } forEach _adTargets;
+};
+
+// If AD profile is killed (by any means), remove permanently
+["atlas_profile_destroyed", {
+    params ["_profileId"];
+    {
+        if (_y get "profileId" == _profileId) exitWith {
+            ATLAS_adRegistry deleteAt _x;
+            ["atlas_air_adDestroyed", [_x, _y get "pos"]] call CBA_fnc_localEvent;
+        };
+    } forEach ATLAS_adRegistry;
+}] call CBA_fnc_addEventHandler;
+```
+
+**Events:**
+- `atlas_air_adDetected` — `[adId, pos, type, side]`
+- `atlas_air_adSuppressed` — `[adId, pos]`
+- `atlas_air_adDestroyed` — `[adId, pos]`
+
+**Player missions:** "Destroy SAM Site" becomes a high-priority player task that unlocks CAS for an area.
+
+---
+
+### 28.3 Dynamic Infrastructure
+
+Infrastructure state affects supply routes, movement, and gameplay.
+
+#### Infrastructure Registry
+
+```sqf
+ATLAS_infrastructureRegistry = createHashMap;  // infraId -> HashMap
+
+// Infrastructure types
+{
+    "id": string,
+    "type": "bridge"|"road_segment"|"power_station"|"fuel_depot"|"radio_tower"|"water_treatment",
+    "pos": [x,y,z],
+    "state": "intact"|"damaged"|"destroyed",
+    "repairProgress": number (0-1),
+    "affectsRoutes": Array<supplyRouteId>,   // which supply routes use this
+    "object": object|objNull,                 // Arma object (for bridges)
+    "repairCost": HashMap<resource, amount>,  // construction supplies needed
+    "_dirty": boolean
+}
+```
+
+#### Bridge Destruction & Repair
+
+```sqf
+// When a bridge is destroyed, supply routes through it are cut
+["atlas_infrastructure_destroyed", {
+    params ["_infraId"];
+    private _infra = ATLAS_infrastructureRegistry get _infraId;
+
+    if (_infra get "type" == "bridge") then {
+        // Cut all supply routes that use this bridge
+        {
+            private _route = ATLAS_supplyRoutes get _x;
+            _route set ["state", "cut"];
+            _route set ["cutReason", format ["Bridge %1 destroyed", _infraId]];
+            ["atlas_supply_routeCut", [_x, _infra get "pos"]] call CBA_fnc_localEvent;
+        } forEach (_infra get "affectsRoutes");
+
+        // Recalculate road graph — remove this segment
+        [_infra get "pos"] call ATLAS_fnc_core_roadGraphRemoveSegment;
+
+        // Generate repair mission for players
+        ["atlas_c2_missionGenerated", [createHashMapFromArray [
+            ["type", "ENGINEER"],
+            ["title", format ["Repair Bridge at %1", _infra get "pos" call ATLAS_fnc_posToGrid]],
+            ["description", "Bridge destruction has cut a supply route. Engineer team required."],
+            ["targetPos", _infra get "pos"],
+            ["requiredResources", _infra get "repairCost"],
+            ["priority", 900]
+        ]]] call CBA_fnc_localEvent;
+    };
+}] call CBA_fnc_addEventHandler;
+
+// Repair: players deliver construction supplies + spend time at location
+ATLAS_fnc_infra_repair = {
+    params ["_infraId", "_progressDelta"];
+    private _infra = ATLAS_infrastructureRegistry get _infraId;
+    private _progress = (_infra get "repairProgress") + _progressDelta;
+
+    if (_progress >= 1.0) then {
+        _infra set ["state", "intact"];
+        _infra set ["repairProgress", 1.0];
+        // Restore supply routes
+        { (ATLAS_supplyRoutes get _x) set ["state", "open"] } forEach (_infra get "affectsRoutes");
+        // Restore road graph segment
+        [_infra get "pos"] call ATLAS_fnc_core_roadGraphRestoreSegment;
+        ["atlas_infrastructure_repaired", [_infraId]] call CBA_fnc_localEvent;
+    } else {
+        _infra set ["repairProgress", _progress];
+        _infra set ["state", "damaged"];
+    };
+};
+```
+
+#### Road Cratering
+
+Artillery bombardment or large IED detonations can crater roads:
+
+```sqf
+// When artillery hits near a road, chance to crater it
+// Cratered road segment: speed reduced 80% until repaired
+// Creates obstacle that wheeled vehicles cannot pass (tracked can at reduced speed)
+
+["atlas_support_fireMissionComplete", {
+    params ["_batteryId", "_targetPos"];
+    private _nearRoads = _targetPos nearRoads 50;
+    if (count _nearRoads > 0 && random 1 > 0.6) then {
+        private _crater = [_targetPos, "road_crater"] call ATLAS_fnc_infra_createDamage;
+        // Road segment speed modifier drops to 0.2
+    };
+}] call CBA_fnc_addEventHandler;
+```
+
+#### Strategic Demolition
+
+Players or OPCOM can order deliberate destruction of infrastructure:
+- Destroy bridge to deny enemy advance
+- Demolish fuel depot to deny enemy supply
+- Cut power to degrade enemy communications (affects SIGINT)
+
+**Events:**
+- `atlas_infrastructure_destroyed` — `[infraId, pos, type, destroyedBy]`
+- `atlas_infrastructure_damaged` — `[infraId, pos, damageLevel]`
+- `atlas_infrastructure_repaired` — `[infraId, pos]`
+
+---
+
+### 28.4 Vehicle Fuel & Ammo Logistics
+
+Vehicles consume fuel and ammo. Empty vehicles are stranded or combat-ineffective.
+
+#### Vehicle State in Profiles
+
+```sqf
+// Profile vehicle state (already partially defined, expanding here)
+// These fields are tracked for every vehicle-type profile:
+{
+    "fuelLevel": number (0-1),    // 0 = empty, 1 = full
+    "ammoLevel": number (0-1),    // 0 = empty, 1 = full
+    "fuelConsumption": number,    // fuel consumed per km (varies by vehicle type)
+    "ammoConsumption": number     // ammo consumed per engagement
+}
+
+// Fuel consumption rates (per km driven, virtual or real)
+// Light vehicle (HMMWV):    0.005 per km (200km range on full tank)
+// APC:                      0.008 per km (125km range)
+// Tank:                     0.015 per km (67km range)
+// Helicopter:               0.020 per km (50km range at cruise)
+// Truck:                    0.004 per km (250km range)
+```
+
+#### Virtual Fuel Consumption
+
+```sqf
+// In fn_virtualMoveStep.sqf, consume fuel proportional to distance moved
+private _distKm = _dist / 1000;
+private _fuelCost = _distKm * (_profile getOrDefault ["fuelConsumption", 0.005]);
+private _newFuel = ((_profile get "fuelLevel") - _fuelCost) max 0;
+_profile set ["fuelLevel", _newFuel];
+
+if (_newFuel <= 0) then {
+    // STRANDED — vehicle cannot move
+    _profile set ["waypoints", []];  // Clear waypoints
+    ["atlas_profile_stranded", [_profile get "id", _profile get "pos", "fuel"]]
+        call CBA_fnc_localEvent;
+
+    // OPCOM: generate fuel resupply request for this profile
+    // C2: generate player mission to deliver fuel
+};
+```
+
+#### Combat Ammo Consumption
+
+```sqf
+// When spawned profiles engage in combat, ammo depletes
+// Monitored via event handler on spawned groups
+
+// Approximate ammo level from remaining magazines
+ATLAS_fnc_profile_assessAmmo = {
+    params ["_group"];
+    private _totalMags = 0;
+    private _fullMags = 0;
+    {
+        private _mags = magazines _x;
+        _totalMags = _totalMags + count _mags;
+        // Compare to full loadout magazine count
+        private _fullCount = count (magazines [_x, true]);
+        _fullMags = _fullMags + _fullCount;
+    } forEach units _group;
+
+    if (_fullMags == 0) exitWith { 0 };
+    _totalMags / _fullMags  // 0-1 ratio
+};
+
+// Periodic check: if ammo below 30%, request resupply
+// If ammo at 0%, profile is combat-ineffective → OPCOM withdraws it
+```
+
+**Events:**
+- `atlas_profile_stranded` — `[profileId, pos, reason ("fuel"|"breakdown")]`
+- `atlas_profile_ammoLow` — `[profileId, ammoLevel]`
+- `atlas_profile_ammoDepleted` — `[profileId]`
+
+**Player missions generated:**
+- "Fuel Convoy to stranded armor column at grid XY"
+- "Ammo resupply to engaged infantry at grid XY"
+
+---
+
+### 28.5 Respawn Integration with Base System
+
+Player respawn is tied to the base hierarchy, creating strategic value for establishing and defending bases.
+
+#### Respawn Points
+
+```sqf
+// Respawn point registry — derived from base registry
+ATLAS_respawnPoints = createHashMap;  // pointId -> HashMap
+
+{
+    "id": string,
+    "type": "MOB"|"FOB"|"COP"|"RALLY"|"HALO",
+    "baseId": string|"",          // linked base (empty for rally/HALO)
+    "pos": [x,y,z],
+    "side": side,
+    "active": boolean,            // false if base is overrun or supply-depleted
+    "capacity": number,           // max simultaneous respawns (-1 = unlimited)
+    "cooldown": number,           // seconds between respawns at this point
+    "tickets": number,            // -1 = unlimited, >0 = limited respawns
+    "requiredMedical": number,    // minimum medical role at base (0 = none)
+    "loadoutRestriction": string  // "full"|"base_only"|"basic"
+}
+```
+
+#### Respawn Availability Rules
+
+| Respawn Point | Available When | Cooldown | Tickets | Loadout |
+|-------------|---------------|----------|---------|---------|
+| **MOB** | Always (unless destroyed) | 30s | Unlimited | Full arsenal |
+| **FOB** | Base active, medical supply >10% | 60s | Unlimited | Full loadout |
+| **COP** | Base active, medical supply >20% | 90s | 20 per session | Base loadout (limited) |
+| **Rally Point** | SL placed, within 500m of squad | 120s | 5 uses then expires | Current loadout only |
+| **HALO** | Airfield operational, weather permits | 180s | Unlimited | Current loadout |
+| **Wave** | Timer-based, all dead players at once | 300s | Unlimited | Role-based loadout |
+
+#### Implementation
+
+```sqf
+// On player killed, show respawn screen with available points
+// Points filtered by: side, active status, ticket availability
+
+ATLAS_fnc_respawn_getAvailable = {
+    params ["_player"];
+    private _side = side _player;
+    private _points = [];
+
+    {
+        private _point = _y;
+        if (_point get "side" != _side) then { continue };
+        if (!(_point get "active")) then { continue };
+        if (_point get "tickets" == 0) then { continue };
+
+        // Check base supply requirements
+        if (_point get "baseId" != "") then {
+            private _base = ATLAS_baseRegistry get (_point get "baseId");
+            if (!isNil "_base") then {
+                if ((_base get "supplies") get "medical" < 10) then { continue };
+                if (_base get "state" != "active") then { continue };
+            };
+        };
+
+        _points pushBack _point;
+    } forEach ATLAS_respawnPoints;
+
+    _points
+};
+
+// Rally point: squad leader places via ACE self-interact or C2
+ATLAS_fnc_respawn_placeRally = {
+    params ["_player"];
+    if (leader group _player != _player) exitWith {
+        ["Only squad leaders can place rally points"] call ATLAS_fnc_c2_notification;
+    };
+
+    private _point = createHashMapFromArray [
+        ["id", format ["RALLY_%1", group _player]],
+        ["type", "RALLY"],
+        ["baseId", ""],
+        ["pos", getPosATL _player],
+        ["side", side _player],
+        ["active", true],
+        ["capacity", 1],
+        ["cooldown", 120],
+        ["tickets", 5],
+        ["requiredMedical", 0],
+        ["loadoutRestriction", "current"]
+    ];
+    ATLAS_respawnPoints set [_point get "id", _point];
+    ["atlas_respawn_rallyPlaced", [_point]] call CBA_fnc_globalEvent;
+};
+```
+
+#### Respawn Wave System (Optional)
+
+```sqf
+// When enabled, dead players wait for a wave timer
+// All dead players in a side respawn simultaneously
+// Creates coordinated reinforcement feel
+
+// CBA Setting: Wave Respawn Interval (60-600s, default 300)
+// CBA Setting: Wave Respawn Enabled (Yes/No, default No)
+// CBA Setting: Minimum Players for Wave (1-10, default 3)
+```
+
+**CBA Settings:**
+```
+ATLAS - Respawn
+  ├── Respawn System Enabled     [Yes / No, default Yes]          (mission setting)
+  ├── MOB Respawn               [Yes / No, default Yes]          (mission setting)
+  ├── FOB Respawn               [Yes / No, default Yes]          (mission setting)
+  ├── COP Respawn               [Yes / No, default No]           (mission setting)
+  ├── Rally Points              [Yes / No, default Yes]          (mission setting)
+  ├── HALO Insertion            [Yes / No, default Yes]          (mission setting)
+  ├── Wave Respawn              [Yes / No, default No]           (mission setting)
+  ├── Wave Interval             [60-600s, default 300]           (runtime tunable)
+  ├── COP Tickets Per Session   [5-50, default 20]               (mission setting)
+  ├── Rally Uses                [1-10, default 5]                (mission setting)
+  └── Respawn Loadout           [Full / Role / Basic]            (mission setting)
+```
+
+---
+
+### 28.6 Map Preset Configurations
+
+Pre-built configurations for popular maps so mission makers can select "Altis Insurgency" and get a sensible starting setup.
+
+#### Preset Structure
+
+```sqf
+// Map presets stored as config classes in atlas_core
+// Each preset defines: objectives, zones, bases, population areas, road quality
+
+class ATLAS_MapPresets {
+    class Altis {
+        class Conventional {
+            description = "Full conventional warfare across Altis";
+            objectives[] = {
+                // Auto-detected objectives are fine, but these add curated ones
+                {"Kavala", {3500, 13000, 0}, "strategic", 800},
+                {"Athira", {14000, 18500, 0}, "strategic", 700},
+                {"Pyrgos", {17000, 12500, 0}, "strategic", 700},
+                {"Altis Airport", {14500, 12700, 0}, "strategic", 1000},
+                {"Sofia", {11500, 3500, 0}, "tactical", 500}
+                // ... ~20-30 curated objectives
+            };
+            bluforZones[] = {{"Altis Airport", {14500, 12700, 0}, 3000}};
+            opforZones[] = {{"Kavala Region", {3500, 13000, 0}, 5000}};
+            baseSuggestions[] = {
+                {"MOB", "Camp Liberty", {14500, 12700, 0}, west},
+                {"FOB", "FOB Hammer", {10000, 12000, 0}, west}
+            };
+        };
+
+        class Insurgency {
+            description = "BLUFOR COIN vs OPFOR insurgency on Altis";
+            objectives[] = { /* urban areas as priority */ };
+            bluforZones[] = {{"Altis Airport", {14500, 12700, 0}, 2000}};
+            opforZones[] = {
+                {"Northern Mountains", {5000, 18000, 0}, 8000},
+                {"Eastern Hills", {22000, 15000, 0}, 5000}
+            };
+            opforMode = "insurgency";
+            iedZones[] = {
+                {"Main Highway", {10000, 13000, 0}, 10000, "medium"},
+                {"Kavala Approach", {3500, 13500, 0}, 3000, "high"}
+            };
+            civilianHighDensity[] = {
+                {"Kavala", {3500, 13000, 0}, 2000, 2.0},
+                {"Athira", {14000, 18500, 0}, 1000, 1.5}
+            };
+        };
+
+        class Occupation {
+            description = "BLUFOR occupies, OPFOR resistance movement";
+            // BLUFOR controls most objectives initially
+            // OPFOR starts with insurgent cells, builds up
+        };
+    };
+
+    class Stratis {
+        class Conventional { /* Stratis-specific */ };
+        class Insurgency { /* Stratis-specific */ };
+    };
+
+    class Tanoa {
+        class Conventional { /* Tanoa: jungle warfare focus */ };
+        class Insurgency { /* Tanoa: Pacific insurgency */ };
+    };
+
+    class Livonia {
+        class Conventional { /* Livonia: European theater */ };
+    };
+
+    // Community maps: can be added via description.ext or CfgATLASPresets
+};
+```
+
+#### Preset Selection
+
+In the Game Master module attributes:
+```
+Scenario Preset: [dropdown]
+  ├── Conventional War
+  ├── Insurgency
+  ├── Occupation
+  ├── Custom
+  └── Map Presets ──► Altis Conventional
+                      Altis Insurgency
+                      Altis Occupation
+                      Stratis Conventional
+                      Tanoa Jungle Warfare
+                      Livonia European Theater
+                      ...
+```
+
+Or via SQF API:
+```sqf
+["Altis", "Insurgency"] call ATLAS_fnc_core_loadMapPreset;
+```
+
+**New functions:**
+```
+atlas_core/fnc/
+  fn_presetLoad.sqf              # Load map preset configuration
+  fn_presetGetAvailable.sqf      # Get available presets for current map
+  fn_presetApplyObjectives.sqf   # Apply preset's curated objectives
+  fn_presetApplyZones.sqf        # Apply preset's zones
+  fn_presetApplyBases.sqf        # Apply preset's suggested bases
+```
+
+#### Community Preset Extension
+
+Third-party maps can ship with ATLAS presets via config:
+```cpp
+// In the map mod's config.cpp or a compat addon
+class CfgATLASPresets {
+    class MyCustomMap {
+        class Conventional {
+            description = "Custom map conventional warfare";
+            objectives[] = { /* ... */ };
+        };
+    };
+};
+```
+
+---
+
+### 28.7 New Functions Summary
+
+**atlas_opcom additions:**
+```
+fn_composeTaskForce.sqf          # Assemble multi-arm task force
+fn_sequenceAttack.sqf            # Phase attack operations (recon→SEAD→arty→CAS→assault)
+fn_combinedArmsBonus.sqf         # Calculate synergy modifier for mixed forces
+fn_assessADThreat.sqf            # Check air defense coverage at objective
+```
+
+**atlas_air additions:**
+```
+fn_adRegister.sqf                # Register air defense site
+fn_adGetThreatLevel.sqf          # Calculate AD threat level at position
+fn_adDetect.sqf                  # Detect AD sites (from intel or recon)
+fn_seadExecute.sqf               # Execute SEAD mission against AD
+fn_seadSuppressEffect.sqf       # Apply suppression timer to AD site
+fn_routeAroundAD.sqf             # Calculate flight path avoiding AD coverage
+```
+
+**atlas_core additions:**
+```
+fn_infraCreate.sqf               # Register infrastructure object
+fn_infraDamage.sqf               # Apply damage to infrastructure
+fn_infraDestroy.sqf              # Destroy infrastructure (cut routes)
+fn_infraRepair.sqf               # Process repair progress
+fn_infraGetBridges.sqf           # Get bridge objects on supply routes
+fn_roadGraphRemoveSegment.sqf    # Remove road segment from graph (bridge destroyed)
+fn_roadGraphRestoreSegment.sqf   # Restore road segment (bridge repaired)
+fn_presetLoad.sqf                # Load map preset
+fn_presetGetAvailable.sqf        # Get presets for current map
+fn_presetApplyObjectives.sqf     # Apply preset objectives
+fn_presetApplyZones.sqf          # Apply preset zones
+fn_presetApplyBases.sqf          # Apply preset bases
+```
+
+**atlas_profile additions:**
+```
+fn_consumeFuel.sqf               # Deplete fuel during virtual movement
+fn_consumeAmmo.sqf               # Deplete ammo during combat
+fn_assessAmmo.sqf                # Calculate ammo level from spawned group
+fn_assessFuel.sqf                # Calculate fuel level from spawned vehicle
+fn_handleStranded.sqf            # Handle stranded vehicle (no fuel)
+fn_handleAmmoDepleted.sqf        # Handle ammo-depleted profile
+```
+
+**atlas_support additions:**
+```
+fn_respawnGetAvailable.sqf       # Get available respawn points for player
+fn_respawnAtPoint.sqf            # Execute respawn at selected point
+fn_respawnPlaceRally.sqf         # Place squad leader rally point
+fn_respawnRemoveRally.sqf        # Remove expired/used rally point
+fn_respawnWaveCheck.sqf          # PFH: check if wave respawn should trigger
+fn_respawnUpdatePoints.sqf       # Update respawn point availability from base states
+```
+
+---
+
+## 29. Mod API & Extension Points
+
+### 29.1 Public API Philosophy
+
+ATLAS.OS provides a stable, documented public API that third-party mods can use. The API consists of:
+
+1. **CBA Events** — Subscribe to any ATLAS event to react to simulation changes
+2. **Public Functions** — Call ATLAS functions to query or modify simulation state
+3. **CBA Settings** — Override ATLAS settings from external mods
+4. **Config Extension** — Add data via CfgATLASPresets, CfgATLASFactions, etc.
+
+### 29.2 Public Event API
+
+All events listed in §12 are part of the public API. Third-party mods can subscribe:
+
+```sqf
+// Third-party mod subscribes to ATLAS events
+// Example: a scoring mod that tracks objective captures
+["atlas_objective_stateChanged", {
+    params ["_objId", "_data"];
+    private _owner = _data get "owner";
+    // Add points to scoring system
+    [_owner, 100] call MY_MOD_fnc_addScore;
+}] call CBA_fnc_addEventHandler;
+
+// Example: a radio mod that intercepts SIGINT events
+["atlas_asymmetric_intelGathered", {
+    params ["_intelType", "_targetCellId", "_accuracy"];
+    if (_intelType == "sigint") then {
+        // Play radio intercept audio
+        call MY_RADIO_fnc_playInterceptSound;
+    };
+}] call CBA_fnc_addEventHandler;
+```
+
+### 29.3 Public Function API
+
+Functions prefixed with `ATLAS_fnc_` that are safe for external use:
+
+```sqf
+// === QUERY FUNCTIONS (read-only, safe to call anytime) ===
+
+// Get all profiles for a side
+_profiles = [west] call ATLAS_fnc_profile_getBySide;
+
+// Get profiles near a position
+_nearby = [_pos, 1000] call ATLAS_fnc_profile_getInArea;
+
+// Get objective by ID
+_obj = ATLAS_objectiveRegistry get "ATLAS_OBJ_001";
+
+// Get frontline points between two sides
+_frontline = [west, east] call ATLAS_fnc_frontline_extract;
+
+// Get base by ID
+_base = ATLAS_baseRegistry get "ATLAS_B_001";
+
+// Get civilian hostility at position
+_hostility = [_pos, "BLU_F"] call ATLAS_fnc_civ_hostilityGet;
+
+// Get stability score at position
+_stability = [_pos] call ATLAS_fnc_civ_stabilityGet;
+
+// Get intel near position
+_intel = [_pos, 500] call ATLAS_fnc_intel_getNear;
+
+// Get weather state
+_weather = +ATLAS_weatherState;  // copy to prevent modification
+
+// Get diplomacy between sides
+_relation = [west, resistance] call ATLAS_fnc_diplomacy_get;
+
+// === MODIFICATION FUNCTIONS (change state, use with care) ===
+
+// Create a profile programmatically
+_profile = ["infantry", ["B_Soldier_F"], west, "BLU_F", _pos] call ATLAS_fnc_profile_create;
+
+// Create an objective
+_obj = [_pos, "tactical", 300, sideUnknown] call ATLAS_fnc_core_objectiveCreate;
+
+// Submit intel from external source
+[createHashMapFromArray [
+    ["type", "contact"], ["pos", _pos], ["side", east],
+    ["source", "external"], ["confidence", 0.8], ["reportedAt", serverTime]
+]] call ATLAS_fnc_intel_create;
+
+// Modify civilian hostility
+[_pos, -20, "EXTERNAL_MOD_EVENT"] call ATLAS_fnc_civ_stabilityUpdate;
+
+// Adjust diplomacy
+[west, resistance, 15] call ATLAS_fnc_diplomacy_modify;
+
+// Generate a player mission
+[createHashMapFromArray [
+    ["type", "CUSTOM"], ["title", "My Mod Mission"],
+    ["description", "Custom mission from external mod"],
+    ["targetPos", _pos], ["priority", 500]
+]] call ATLAS_fnc_c2_missionCreate;
+```
+
+### 29.4 Config Extension Points
+
+Third-party mods can extend ATLAS data via config:
+
+```cpp
+// === Add custom factions ===
+class CfgATLASFactions {
+    class MyCustomFaction {
+        side = 1;  // west
+        displayName = "Custom Force";
+        forceComposition[] = {
+            {"infantry", 0.5}, {"motorized", 0.3}, {"armor", 0.2}
+        };
+        moraleConfig[] = {85, 3, 35};  // baseMorale, recoveryRate, breakingThreshold
+    };
+};
+
+// === Add map presets ===
+class CfgATLASPresets {
+    class MyMap {
+        class Insurgency {
+            description = "Insurgency on my custom map";
+            objectives[] = { /* ... */ };
+        };
+    };
+};
+
+// === Add custom civilian encounter types ===
+class CfgATLASEncounters {
+    class myCustomEncounter {
+        displayName = "Tribal Dispute";
+        condition = "true";
+        script = "mymod\fnc\customEncounter.sqf";
+        stabilityEffect = -10;
+    };
+};
+
+// === Add custom OPCOM order types ===
+class CfgATLASOrders {
+    class myCustomOrder {
+        displayName = "Special Recon";
+        forceTypes[] = {"recon", "infantry"};
+        script = "mymod\fnc\customOrder.sqf";
+    };
+};
+```
+
+### 29.5 Extension Callback API
+
+Third-party mods can register callbacks for ATLAS extension operations:
+
+```sqf
+// Register callback for when ATLAS extension completes an operation
+["atlas_persist_extensionCallback", {
+    params ["_callId", "_result"];
+    // Third-party mod can react to DB operations
+    if (_callId find "MY_MOD_" == 0) then {
+        [_callId, _result] call MY_MOD_fnc_handleDBResult;
+    };
+}] call CBA_fnc_addEventHandler;
+
+// Third-party mod can use the ATLAS extension for its own DB operations
+// (if the extension supports custom queries)
+_callId = "atlas_db" callExtension ["CUSTOM_QUERY", "MY_MOD_SELECT * FROM my_table"];
+```
+
+### 29.6 API Versioning
+
+```sqf
+// ATLAS API version — third-party mods can check compatibility
+ATLAS_apiVersion = 1;
+ATLAS_apiVersionString = "1.0.0";
+
+// Third-party mod checks API version
+if (ATLAS_apiVersion < 1) exitWith {
+    diag_log "[MY_MOD] Requires ATLAS API v1+. Please update ATLAS.OS.";
+};
+```
+
+### 29.7 API Stability Guarantees
+
+| API Layer | Stability | Policy |
+|-----------|-----------|--------|
+| **CBA Events** (names + payload format) | Stable | Names never change. Payload only extended (new fields), never removed. |
+| **Public query functions** | Stable | Signatures never change. New optional params may be added. |
+| **Public modification functions** | Semi-stable | May change between major versions. Deprecation warnings first. |
+| **Config extension classes** | Stable | Class names and field names never change. New fields may be added. |
+| **Internal functions** (no `ATLAS_fnc_` prefix guarantee) | Unstable | May change at any time. Do not call from external mods. |
+| **Registry HashMaps** (field names) | Semi-stable | Fields may be added. Existing field names/types stable within major version. |
+| **Extension DLL interface** | Semi-stable | Function codes stable. Payload format may change. |
 
 ---
 
