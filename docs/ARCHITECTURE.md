@@ -28,6 +28,8 @@
 18. [Coding Standards — No God Objects](#18-coding-standards)
 19. [Detailed Module Internal Breakdowns](#19-module-breakdowns)
 20. [Full Spectrum Operations Design](#20-full-spectrum-operations)
+21. [ACE3 & KAT Medical Integration](#21-ace3-kat-integration)
+22. [Feature Parity Gap Analysis](#22-gap-analysis)
 
 ---
 
@@ -3826,6 +3828,504 @@ fn_intelLoad.sqf                 # Load intel registry
 fn_stabilitySave.sqf             # Save stability map
 fn_stabilityLoad.sqf             # Load stability map
 ```
+
+---
+
+## 21. ACE3 & KAT Medical Integration
+
+ATLAS.OS treats ACE3 as a first-class integration target and KAT Advanced Medical as a supported optional addon. The integration is provided through `atlas_compat_ace` (optional PBO) which bridges ATLAS systems to ACE3 APIs. If ACE3 is not loaded, ATLAS falls back to vanilla Arma mechanics.
+
+### 21.1 Integration Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     ATLAS.OS Modules                         │
+│  atlas_civilian, atlas_c2, atlas_asymmetric, atlas_logistics │
+└──────────┬──────────────────────────────────────────────────┘
+           │ Events + Function calls
+           ▼
+┌─────────────────────────────────────────────────────────────┐
+│              atlas_compat_ace (Optional PBO)                  │
+│                                                               │
+│  Bridges ATLAS events to ACE3 APIs. If ACE3 not loaded,      │
+│  this PBO does nothing (all functions check ace_common).      │
+│                                                               │
+│  ┌─────────┐ ┌──────────┐ ┌────────┐ ┌──────────────────┐  │
+│  │ Medical │ │Interact  │ │ Cargo  │ │  Explosives/IED   │  │
+│  │ Bridge  │ │ Bridge   │ │ Bridge │ │  Bridge           │  │
+│  └────┬────┘ └────┬─────┘ └───┬────┘ └────┬─────────────┘  │
+│       │           │           │            │                  │
+└───────┼───────────┼───────────┼────────────┼─────────────────┘
+        ▼           ▼           ▼            ▼
+┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+│ace_medical│ │ace_inter │ │ace_cargo │ │ace_explo │
+│ace_medkit │ │ace_menu  │ │ace_drag  │ │ace_mines │
+│(KAT opt) │ │          │ │ace_carry │ │          │
+└──────────┘ └──────────┘ └──────────┘ └──────────┘
+```
+
+### 21.2 Detection Pattern
+
+```sqf
+// atlas_compat_ace XEH_preInit.sqf
+ATLAS_aceLoaded = isClass (configFile >> "CfgPatches" >> "ace_common");
+ATLAS_katLoaded = isClass (configFile >> "CfgPatches" >> "kat_main");
+
+if (!ATLAS_aceLoaded) exitWith {
+    diag_log "[ATLAS][ACE] ACE3 not detected. Using vanilla fallbacks.";
+};
+
+diag_log format ["[ATLAS][ACE] ACE3 detected. KAT Medical: %1", ATLAS_katLoaded];
+```
+
+### 21.3 Medical Integration
+
+ATLAS systems interact with ACE3/KAT medical in these scenarios:
+
+| ATLAS System | Medical Interaction | ACE3/KAT API |
+|-------------|-------------------|-------------|
+| **Civilian CASEVAC** | Check if civilian is injured, treat, transport | `ace_medical_fnc_getWoundBleeding`, `ace_medical_treatment_fnc_*` |
+| **Hearts & Minds** | Civilian medical encounters need treatment | Spawn civilian with ACE wounds applied |
+| **Player state persistence** | Save/restore medical state across sessions | `ace_medical_fnc_getAllWounds`, wound arrays, medication state |
+| **Statistics** | Track medical events (treated, died, CASEVAC'd) | `ace_medical` event handlers |
+| **AI casualties** | Wounded AI (not just dead) for intel interrogation | `ace_medical_fnc_setUnconscious` |
+| **Supply chain** | Medical supplies as a resource type | Check/consume ACE medical items |
+
+#### Medical State Persistence
+
+```sqf
+// Save player medical state (with ACE3)
+ATLAS_fnc_persist_playerSaveMedical = {
+    params ["_player"];
+    if (!ATLAS_aceLoaded) exitWith { createHashMap };
+
+    createHashMapFromArray [
+        ["wounds", _player getVariable ["ace_medical_openWounds", []]],
+        ["bandagedWounds", _player getVariable ["ace_medical_bandagedWounds", []]],
+        ["stitchedWounds", _player getVariable ["ace_medical_stitchedWounds", []]],
+        ["bloodVolume", _player getVariable ["ace_medical_bloodVolume", 6.0]],
+        ["pain", _player getVariable ["ace_medical_pain", 0]],
+        ["heartRate", _player getVariable ["ace_medical_heartRate", 80]],
+        ["bloodPressure", _player getVariable ["ace_medical_bloodPressure", [80, 120]]],
+        ["medications", _player getVariable ["ace_medical_medications", []]],
+        ["isUnconscious", _player getVariable ["ace_medical_isUnconscious", false]],
+        // KAT extensions (if loaded)
+        ["kat_bloodType", if (ATLAS_katLoaded) then {
+            _player getVariable ["kat_bloodtype", "O+"]
+        } else { "O+" }],
+        ["kat_airway", if (ATLAS_katLoaded) then {
+            _player getVariable ["kat_airway_status", "clear"]
+        } else { "clear" }],
+        ["kat_spo2", if (ATLAS_katLoaded) then {
+            _player getVariable ["kat_SpO2", 99]
+        } else { 99 }]
+    ]
+};
+
+// Restore medical state
+ATLAS_fnc_persist_playerLoadMedical = {
+    params ["_player", "_medState"];
+    if (!ATLAS_aceLoaded || _medState isEqualTo createHashMap) exitWith {};
+
+    _player setVariable ["ace_medical_openWounds", _medState getOrDefault ["wounds", []], true];
+    _player setVariable ["ace_medical_bandagedWounds", _medState getOrDefault ["bandagedWounds", []], true];
+    _player setVariable ["ace_medical_bloodVolume", _medState getOrDefault ["bloodVolume", 6.0], true];
+    _player setVariable ["ace_medical_pain", _medState getOrDefault ["pain", 0], true];
+    _player setVariable ["ace_medical_heartRate", _medState getOrDefault ["heartRate", 80], true];
+    _player setVariable ["ace_medical_bloodPressure", _medState getOrDefault ["bloodPressure", [80, 120]], true];
+    _player setVariable ["ace_medical_medications", _medState getOrDefault ["medications", []], true];
+
+    if (_medState getOrDefault ["isUnconscious", false]) then {
+        [_player, true] call ace_medical_fnc_setUnconscious;
+    };
+
+    if (ATLAS_katLoaded) then {
+        _player setVariable ["kat_bloodtype", _medState getOrDefault ["kat_bloodType", "O+"], true];
+        _player setVariable ["kat_airway_status", _medState getOrDefault ["kat_airway", "clear"], true];
+        _player setVariable ["kat_SpO2", _medState getOrDefault ["kat_spo2", 99], true];
+    };
+};
+```
+
+#### Civilian CASEVAC with ACE Medical
+
+```sqf
+// Spawn injured civilian with ACE wounds for CASEVAC encounter
+ATLAS_fnc_ace_spawnInjuredCivilian = {
+    params ["_agent"];
+    if (!ATLAS_aceLoaded) exitWith {
+        // Vanilla fallback: just set damage
+        _agent setDamage 0.6;
+    };
+
+    // Apply realistic ACE wounds
+    private _woundType = selectRandom ["avulsion", "velocity", "crush", "laceration"];
+    private _bodyPart = selectRandom ["head", "body", "leftleg", "rightleg"];
+
+    // Use ACE medical API to add wound
+    [_agent, _woundType, _bodyPart, 1] call ace_medical_fnc_addDamageToUnit;
+
+    // Make unconscious for severe cases
+    if (random 1 > 0.5) then {
+        [_agent, true] call ace_medical_fnc_setUnconscious;
+    };
+
+    // Set blood volume low (needs transfusion)
+    _agent setVariable ["ace_medical_bloodVolume", 4.2 + random 1.0, true];
+};
+```
+
+### 21.4 ACE Interaction Menu Integration
+
+ATLAS adds actions to ACE3's interaction menu instead of using vanilla addAction:
+
+```sqf
+// Add ATLAS interactions to civilians via ACE3 interact menu
+ATLAS_fnc_ace_addCivInteractions = {
+    params ["_agent"];
+    if (!ATLAS_aceLoaded) exitWith {
+        // Vanilla fallback: addAction
+        _agent addAction ["Question Civilian", { [_this#0, _this#1] call ATLAS_fnc_civ_interactQuestion }];
+        _agent addAction ["Detain", { [_this#0, _this#1] call ATLAS_fnc_civ_interactDetain }];
+        _agent addAction ["Search", { [_this#0, _this#1] call ATLAS_fnc_civ_interactSearch }];
+    };
+
+    // ACE3 interaction menu actions
+    private _questionAction = [
+        "ATLAS_questionCiv", "Question Civilian", "",
+        { [_target, _player] call ATLAS_fnc_civ_interactQuestion },
+        { alive _target && _target getVariable ["ATLAS_isCivilian", false] }
+    ] call ace_interact_menu_fnc_createAction;
+    [_agent, 0, ["ACE_MainActions"], _questionAction] call ace_interact_menu_fnc_addActionToObject;
+
+    private _detainAction = [
+        "ATLAS_detainCiv", "Detain", "",
+        { [_target, _player] call ATLAS_fnc_civ_interactDetain },
+        { alive _target && _target getVariable ["ATLAS_isCivilian", false]
+          && !(_target getVariable ["ace_captives_isHandcuffed", false]) }
+    ] call ace_interact_menu_fnc_createAction;
+    [_agent, 0, ["ACE_MainActions"], _detainAction] call ace_interact_menu_fnc_addActionToObject;
+
+    private _searchAction = [
+        "ATLAS_searchCiv", "Search", "",
+        { [_target, _player] call ATLAS_fnc_civ_interactSearch },
+        { alive _target && _target getVariable ["ATLAS_isCivilian", false] }
+    ] call ace_interact_menu_fnc_createAction;
+    [_agent, 0, ["ACE_MainActions"], _searchAction] call ace_interact_menu_fnc_addActionToObject;
+};
+```
+
+### 21.5 ACE Cargo Integration for Logistics
+
+Supply crates in the logistics system use ACE cargo for loading/unloading:
+
+```sqf
+// Create a supply crate that works with ACE cargo
+ATLAS_fnc_ace_createSupplyCrate = {
+    params ["_type", "_pos"];  // _type: "ammo"|"fuel"|"food"|"water"|"medical"|"construction"
+
+    private _classname = switch (_type) do {
+        case "ammo":         { "Box_NATO_Ammo_F" };
+        case "fuel":         { "CargoNet_01_barrels_F" };
+        case "food":         { "C_IDAP_supplyCrate_F" };
+        case "water":        { "C_IDAP_supplyCrate_F" };
+        case "medical":      { "ACE_medicalSupplyCrate" };
+        case "construction": { "Land_Pallets_F" };
+        default              { "Box_NATO_Support_F" };
+    };
+
+    private _crate = createVehicle [_classname, _pos, [], 0, "CAN_COLLIDE"];
+    _crate setVariable ["ATLAS_supplyType", _type, true];
+    _crate setVariable ["ATLAS_supplyAmount", 100, true];
+
+    if (ATLAS_aceLoaded) then {
+        // Set ACE cargo size so it can be loaded into vehicles
+        [_crate, 4] call ace_cargo_fnc_setSize;
+        // Enable ACE dragging/carrying
+        [_crate, true, [0, 1.5, 0], 0, false] call ace_dragging_fnc_setDraggable;
+        [_crate, true, [0, 1.5, 0], 0, false] call ace_dragging_fnc_setCarryable;
+    };
+
+    _crate
+};
+```
+
+### 21.6 ACE Explosives Integration for IEDs
+
+ATLAS IEDs use ACE explosive triggers when available:
+
+```sqf
+// Place IED using ACE explosives system
+ATLAS_fnc_ace_placeIED = {
+    params ["_pos", "_iedType"];
+    if (!ATLAS_aceLoaded) exitWith {
+        // Vanilla IED: use mine objects
+        createMine ["APERSMine", _pos, [], 0]
+    };
+
+    // ACE explosive with pressure plate trigger
+    private _explosive = switch (_iedType) do {
+        case "IED":   { "ACE_Explosives_Place_APERSBoundingMine" };
+        case "VBIED":  { "DemoCharge_Remote_Ammo" };
+        default        { "ACE_Explosives_Place_APERSMine" };
+    };
+
+    private _ied = createVehicle [_explosive, _pos, [], 0, "CAN_COLLIDE"];
+    // Configure ACE trigger type (pressure plate for road IEDs)
+    _ied setVariable ["ace_explosives_triggerType", "PressurePlate", true];
+    _ied
+};
+```
+
+### 21.7 ACE Captives for Civilian Detention
+
+```sqf
+// Detain civilian using ACE captives system
+ATLAS_fnc_ace_detainCivilian = {
+    params ["_agent", "_player"];
+    if (!ATLAS_aceLoaded) exitWith {
+        // Vanilla: disable AI, play surrender animation
+        _agent disableAI "MOVE";
+        _agent playMoveNow "AmovPercMstpSsurWnonDnon";
+    };
+
+    // ACE handcuff + escort
+    [_player, _agent] call ace_captives_fnc_doHandcuffed;
+};
+```
+
+### 21.8 Additional ACE System Hooks
+
+| ACE System | ATLAS Integration Point |
+|-----------|------------------------|
+| **ace_fortify** | Player base construction (FOB/COP/PB establishment uses fortify budget system) |
+| **ace_repair** | Vehicle damage persistence — save ACE repair state per vehicle component |
+| **ace_hearing** | IED detonation applies hearing damage via `ace_hearing_fnc_addDeafness` |
+| **ace_weather** | Sync ATLAS weather persistence with ACE weather calculations |
+| **ace_maptools** | C2 tablet map tools integration — ruler, protractor for planning |
+| **ace_zeus** | ATLAS admin actions available in Zeus interface |
+| **ace_magazinerepack** | Ammo supply level calculation accounts for partial magazines |
+| **ace_captives** | Civilian detention, POW mechanics for intel gathering |
+
+### 21.9 KAT Medical Specific Integration
+
+When KAT is loaded, ATLAS enhances medical encounters:
+
+```sqf
+// Enhanced CASEVAC with KAT medical details
+ATLAS_fnc_kat_enhanceCasevac = {
+    params ["_agent"];
+    if (!ATLAS_katLoaded) exitWith {};
+
+    // Assign random blood type (affects which blood products are needed)
+    private _bloodType = selectRandom ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
+    _agent setVariable ["kat_bloodtype", _bloodType, true];
+
+    // Possible airway obstruction (requires KAT airway management)
+    if (random 1 > 0.6) then {
+        _agent setVariable ["kat_airway_status", "obstructed", true];
+    };
+
+    // Low SpO2 requiring oxygen
+    _agent setVariable ["kat_SpO2", 75 + floor random 20, true];
+
+    // Possible pneumothorax
+    if (random 1 > 0.7) then {
+        _agent setVariable ["kat_pneumothorax", selectRandom [1, 2], true]; // 1=standard, 2=tension
+    };
+};
+
+// Medical supply crates include KAT items when available
+ATLAS_fnc_kat_stockMedicalCrate = {
+    params ["_crate"];
+    if (!ATLAS_katLoaded) exitWith {};
+
+    // Add KAT-specific medical supplies
+    _crate addItemCargoGlobal ["kat_guedel", 5];
+    _crate addItemCargoGlobal ["kat_laryngoscope", 2];
+    _crate addItemCargoGlobal ["kat_chestSeal", 10];
+    _crate addItemCargoGlobal ["kat_aed", 1];
+    _crate addItemCargoGlobal ["kat_IV_stand", 2];
+
+    // Blood products (universal donor O- and common types)
+    _crate addItemCargoGlobal ["kat_blood_O_neg_500", 5];
+    _crate addItemCargoGlobal ["kat_blood_O_pos_500", 5];
+    _crate addItemCargoGlobal ["kat_blood_A_pos_500", 3];
+
+    // Medications
+    _crate addItemCargoGlobal ["kat_naloxone", 5];
+    _crate addItemCargoGlobal ["kat_norepinephrine", 5];
+    _crate addItemCargoGlobal ["kat_TXA", 10];
+};
+```
+
+### 21.10 `atlas_compat_ace` PBO Structure
+
+```
+atlas_compat_ace/
+  config.cpp                     # CfgPatches (requires ace_common), CfgFunctions
+  CfgEventHandlers.hpp
+  XEH_preInit.sqf                # Detect ACE3/KAT, set flags
+  XEH_postInit.sqf               # Register ACE event handlers
+  fnc/
+    fn_init.sqf                  # Initialize all ACE bridges
+    fn_isLoaded.sqf              # Check ACE3/KAT availability
+
+    # Medical bridge
+    fn_medicalSaveState.sqf      # Save ACE/KAT medical state for persistence
+    fn_medicalLoadState.sqf      # Restore ACE/KAT medical state
+    fn_medicalSpawnInjured.sqf   # Apply ACE wounds to civilian for CASEVAC
+    fn_medicalEnhanceKAT.sqf     # Apply KAT-specific injuries (airway, SpO2, blood type)
+
+    # Interaction bridge
+    fn_interactAddCivActions.sqf # Add ATLAS actions to ACE interact menu
+    fn_interactAddC2Actions.sqf  # Add C2 tablet to ACE self-interact
+    fn_interactAddIEDActions.sqf # Add IED disarm to ACE interact
+
+    # Cargo/logistics bridge
+    fn_cargoCreateCrate.sqf      # Create ACE-compatible supply crate
+    fn_cargoCrateStockKAT.sqf    # Add KAT items to medical crates
+    fn_cargoSetDraggable.sqf     # Enable ACE drag/carry on ATLAS objects
+
+    # Explosives bridge
+    fn_explosivesPlaceIED.sqf    # Place IED using ACE explosive triggers
+    fn_explosivesDisarm.sqf      # IED disarm using ACE defusal
+
+    # Captives bridge
+    fn_captivesDetain.sqf        # Detain using ACE captives
+    fn_captivesRelease.sqf       # Release detainee
+
+    # Fortify bridge
+    fn_fortifyBaseBudget.sqf     # Set ACE fortify budget for base construction
+
+    # Other bridges
+    fn_repairSaveState.sqf       # Save ACE repair component state
+    fn_repairLoadState.sqf       # Restore ACE repair state
+    fn_weatherSync.sqf           # Sync ACE weather with ATLAS persistence
+    fn_hearingIEDBlast.sqf       # Apply hearing damage from IED detonation
+```
+
+---
+
+## 22. Feature Parity Gap Analysis
+
+### 22.1 ALiVE Features — Full Mapping
+
+Every feature ALiVE provides, mapped to its ATLAS equivalent:
+
+| ALiVE Feature | ALiVE Module | ATLAS Module | Status | Notes |
+|---|---|---|---|---|
+| **Core Framework** | | | | |
+| Custom hash/OOP | x_lib | Native HashMaps | Replaced | 6x faster |
+| Module init/coordination | main | atlas_core | Covered | Event-driven |
+| Static data indexer | sys_indexer | atlas_core (sectors) | Covered | Merged |
+| **Data & Persistence** | | | | |
+| Data storage (CouchDB) | sys_data_couchdb | atlas_persist (PostgreSQL) | Covered | Improved |
+| Data storage (PNS) | sys_data_pns | atlas_persist | Covered | |
+| Player state persistence | sys_player | atlas_persist | Covered | Merged |
+| Weather persistence | sys_weather | atlas_persist | Covered | Merged |
+| **Profile System** | | | | |
+| Virtual unit profiles | sys_profile | atlas_profile | Covered | HashMap-based |
+| Profile handler (CRUD) | sys_profileHandler | atlas_profile | Covered | Merged |
+| Spawn/despawn | sys_profile | atlas_profile | Covered | Hysteresis + events |
+| Virtual movement | sys_profile | atlas_profile §20.1 | Covered | Road graph A* |
+| Pathfinding | sys_pathfinding | atlas_core §20.1 | Covered | Improved |
+| **Military AI** | | | | |
+| OPCOM (strategic AI) | mil_opcom | atlas_opcom | Covered | CBA SM + intel |
+| TACOM (tactical) | mil_opcom FSMs | atlas_opcom (execute) | Covered | Merged |
+| Military placement | mil_placement | atlas_placement | Covered | |
+| Custom placement | mil_placement_custom | atlas_placement | Covered | Config-based |
+| SPE placement | mil_placement_spe | atlas_placement | Covered | Config-based |
+| Command behaviors | mil_command | atlas_opcom | Covered | 12 order types |
+| **Combat** | | | | |
+| CQB (garrison) | mil_CQB | atlas_cqb | Covered | Event-driven |
+| IED system | mil_ied | atlas_asymmetric | Covered | |
+| Intelligence | mil_intelligence | atlas_asymmetric §20.6 | Covered | Intel pipeline |
+| Convoy operations | mil_convoy | atlas_logistics | Covered | Merged |
+| Air Tasking Order | mil_ato | atlas_air | Covered | |
+| **Civilian** | | | | |
+| Population system | amb_civ_population | atlas_civilian | Covered | Agent pooling |
+| Placement/density | civ_placement | atlas_civilian | Covered | Merged |
+| 20+ behaviors | amb_civ_command | atlas_civilian | Covered | CBA FSM states |
+| Interactions | amb_civ_population | atlas_civilian | Covered | ACE integrated |
+| **Support** | | | | |
+| Combat support (CAS/arty/transport) | sup_combatsupport | atlas_air + atlas_support | Covered | Split by domain |
+| Player resupply | sup_player_resupply | atlas_logistics | Covered | Merged |
+| Multi-spawn/insertion | sup_multispawn | atlas_support | Covered | |
+| Group manager | sup_group_manager | atlas_support | Covered | |
+| **C2/Reporting** | | | | |
+| C2ISTAR tablet | C2ISTAR | atlas_c2 | Covered | Improved |
+| Task framework | inside C2ISTAR | atlas_c2 | Covered | |
+| SPOTREP | sys_spotrep | atlas_c2 | Covered | Merged |
+| SITREP | sys_sitrep | atlas_c2 | Covered | Merged |
+| PATROLREP | sys_patrolrep | atlas_c2 | Covered | Merged |
+| **System Utilities** | | | | |
+| Garbage collection | sys_GC | atlas_gc | Covered | Event queue + PFH |
+| AI skill management | sys_aiskill | atlas_ai | Covered | CBA Settings |
+| Statistics | sys_statistics | atlas_stats | Covered | |
+| Admin actions | sys_adminactions | atlas_admin | Covered | |
+| Map markers | sys_marker | atlas_core | Covered | Merged |
+| Map analysis | fnc_analysis | atlas_core | Covered | Merged |
+| Strategic clusters | fnc_strategic | atlas_core | Covered | Merged |
+| **Peripheral Systems** | | | | |
+| View distance | sys_viewdistance | atlas_core (CBA Setting) | Covered | Single setting |
+| Player tags | sys_playertags | Deferred | Phase 2 | Non-critical |
+| Crew info display | sys_crewinfo | Deferred | Phase 2 | Non-critical |
+| Newsfeed | sys_newsfeed | atlas_c2 (events panel) | Covered | Absorbed into C2 |
+| XStream spectator | sys_xstream | Deferred | Phase 2 | Non-critical |
+| Player options | sys_playeroptions | CBA Settings | Covered | Built-in |
+| ORBAT creator | sys_orbatcreator | Deferred | Phase 2 | Major tool, separate effort |
+| Object logistics | sys_logistics | atlas_compat_ace | Covered | ACE cargo/drag/carry |
+| Performance monitor | sys_perf | atlas_admin (debug) | Covered | Debug menu + adaptive |
+| ACE menu integration | sys_acemenu | atlas_compat_ace | Covered | Full ACE3 bridge |
+| **Compositions/Data** | | | | |
+| Group definitions | grp_a3, composition_* | atlas_placement (config) | Covered | Data-driven |
+| Tablet 3D model | m_tablet, c_tablet | atlas_c2 (assets) | Needs asset | Create or reuse |
+
+### 22.2 Coverage Summary
+
+| Category | ALiVE Features | ATLAS Covered | ATLAS Improved | Deferred | New in ATLAS |
+|----------|---------------|--------------|----------------|----------|-------------|
+| Core/Data | 5 | 5 | 3 | 0 | 2 (PostgreSQL, HC) |
+| Profiles | 5 | 5 | 4 | 0 | 1 (road pathfinding) |
+| Military AI | 6 | 6 | 4 | 0 | 3 (intel, bases, frontline) |
+| Combat | 5 | 5 | 2 | 0 | 0 |
+| Civilian | 4 | 4 | 3 | 0 | 2 (H&M, CASEVAC) |
+| Support | 4 | 4 | 1 | 0 | 0 |
+| C2/Reporting | 5 | 5 | 3 | 0 | 3 (tasking, intel, frontline) |
+| Utilities | 8 | 8 | 2 | 0 | 2 (adaptive, HC) |
+| Peripheral | 8 | 4 | 0 | 3 | 0 |
+| Compat/ACE | 1 | 1 | 1 | 0 | 2 (KAT, full ACE bridge) |
+| **Total** | **51** | **47** | **23** | **3** | **15** |
+
+### 22.3 Deferred Items (Phase 2)
+
+These are "nice to have" features that don't affect core simulation:
+
+1. **Player Tags** (`sys_playertags`) — Name tags with recognition. Low priority; many community mods do this already (ShackTac, etc.).
+2. **Crew Info** (`sys_crewinfo`) — Vehicle crew HUD. Low priority; could be a simple PFH.
+3. **XStream Spectator** (`sys_xstream`) — Advanced spectator camera. Arma 3 now has built-in spectator. Low priority.
+4. **ORBAT Creator** (`sys_orbatcreator`) — ALiVE's is 312KB. This is effectively a separate application. Phase 2 as its own project.
+
+### 22.4 New ATLAS Features Beyond ALiVE
+
+| Feature | Section | Description |
+|---------|---------|-------------|
+| Cross-server persistence | §11 | Multiple servers share theater state via PostgreSQL |
+| Headless client distribution | §8.4 | Automatic AI load balancing across HCs |
+| Base infrastructure | §20.2 | FOB/COP/PB/OP hierarchy with supply chains |
+| Natural frontline | §20.3 | Influence map with toggleable C2 map layer |
+| Player tasking engine | §20.5 | 12 contextual mission types from simulation state |
+| Recon/intel pipeline | §20.6 | Intel decay, corroboration, fog of war for OPCOM |
+| Hearts & minds | §20.7 | Civilian needs, CASEVAC, humanitarian encounters |
+| Enhanced supply chain | §20.8 | 6 resource types, supply routes, base consumption |
+| Adaptive performance | §17.5 | Auto-adjust spawn distance/density based on FPS |
+| CBA Settings | §17.4 | 50+ runtime-tunable settings |
+| Editor modules | §17.2 | 12 module types, no sync lines |
+| ACE3 full integration | §21 | Medical, interaction, cargo, explosives, captives |
+| KAT Medical support | §21.9 | Blood types, airway, SpO2, enhanced CASEVAC |
+| Road graph pathfinding | §20.1 | A* on actual road network for virtual movement |
+| Multi-session campaigns | §20.9 | Full persistent campaign across sessions/servers |
 
 ---
 
