@@ -24,6 +24,9 @@
 14. [PBO Directory Structure](#14-pbo-directory-structure)
 15. [Performance Projections](#15-performance-projections)
 16. [Key Architectural Decisions](#16-architectural-decisions)
+17. [Mission Editor Workflow & Configuration](#17-mission-editor-workflow)
+18. [Coding Standards — No God Objects](#18-coding-standards)
+19. [Detailed Module Internal Breakdowns](#19-module-breakdowns)
 
 ---
 
@@ -1145,9 +1148,357 @@ Modules gate on CBA events, not polling:
 
 ---
 
-## 17. Coding Standards — No God Objects
+## 17. Mission Editor Workflow & Configuration
 
-### 17.1 Hard Rules
+### 17.1 Design Philosophy: Progressive Complexity
+
+ALiVE requires placing 10-20 editor modules and wiring them with sync lines — a steep learning curve that punishes small mistakes with silent failures. ATLAS replaces this with **progressive complexity**: simple missions should take 60 seconds to set up, and complexity should be opt-in.
+
+Three tiers of mission making:
+
+| Tier | Effort | Who It's For | How It Works |
+|------|--------|-------------|-------------|
+| **Quickstart** | 60 seconds | New users, quick testing | Place 1 module, pick 2 factions, play |
+| **Standard** | 5-15 minutes | Most mission makers | Place zone markers, adjust CBA Settings |
+| **Advanced** | Unlimited | Scenario designers | Full programmatic config via `description.ext` class or SQF API |
+
+### 17.2 Editor Objects: Minimal by Design
+
+**Quickstart (one module):**
+
+Place a single **ATLAS Game Master** module anywhere on the map. Configure via its attributes:
+
+```
+ATLAS Game Master (editor module attributes):
+  ├── BLUFOR Faction: [dropdown — CfgFactionClasses]
+  ├── OPFOR Faction: [dropdown]
+  ├── INDFOR Faction: [dropdown / none]
+  ├── Scenario Preset: [Conventional War / Insurgency / Occupation / Custom]
+  ├── Auto-detect Objectives: [Yes / No]
+  ├── Force Scale: [Light / Medium / Heavy / Custom]
+  └── Theater Name: [string — for cross-server identification]
+```
+
+That's it. One module, six fields. ATLAS auto-detects objectives from the map, places forces proportional to faction strength, configures OPCOM modes from the preset, and starts the simulation.
+
+**Standard (zone markers):**
+
+For more control, place **area markers** in the editor with ATLAS-recognized prefixes:
+
+```
+Marker naming convention:
+  ATLAS_zone_blufor_1    — BLUFOR starting area (area marker)
+  ATLAS_zone_opfor_1     — OPFOR starting area
+  ATLAS_zone_opfor_2     — Second OPFOR area (multiple allowed)
+  ATLAS_zone_indfor_1    — INDFOR area
+  ATLAS_zone_civ_1       — Civilian activity override area (higher/lower density)
+  ATLAS_zone_exclude_1   — Exclusion zone (no ATLAS activity here)
+  ATLAS_obj_custom_1     — Manually placed objective (overrides auto-detect)
+  ATLAS_obj_custom_2     — Another manual objective
+```
+
+Zone markers are standard Arma 3 area markers. Their size defines the operational area. Their color is ignored (side is determined by name). No sync lines needed.
+
+**Advanced (programmatic config):**
+
+Full control via `description.ext` or runtime SQF:
+
+```cpp
+// description.ext — class-based configuration
+class ATLAS {
+    class Theater {
+        name = "Operation Thunderbolt";
+        autoDetectObjectives = 1;      // 0 = off, 1 = detect+confirm, 2 = detect+use
+        forceScale = 1.0;              // multiplier
+    };
+
+    class Sides {
+        class BLUFOR {
+            faction = "BLU_F";
+            mode = "conventional";      // conventional, insurgency, occupation
+            zones[] = {"ATLAS_zone_blufor_1", "ATLAS_zone_blufor_2"};
+            forceComposition[] = {      // override auto-composition
+                {"infantry", 0.6},
+                {"motorized", 0.2},
+                {"mechanized", 0.1},
+                {"armor", 0.05},
+                {"air", 0.05}
+            };
+        };
+        class OPFOR {
+            faction = "OPF_F";
+            mode = "insurgency";
+            zones[] = {"ATLAS_zone_opfor_1"};
+        };
+    };
+
+    class Modules {
+        cqb = 1;                        // 0 = disabled
+        civilians = 1;
+        asymmetric = 1;
+        logistics = 1;
+        air = 1;
+        c2 = 1;
+    };
+
+    class Persistence {
+        backend = "pns";                // "pns", "postgresql", "both"
+        autoSaveInterval = 300;         // seconds
+        connectionString = "";          // PostgreSQL connection (empty = PNS only)
+    };
+};
+```
+
+Or via SQF at runtime (for dynamic mission frameworks like MCC, Zeus, etc.):
+
+```sqf
+// SQF API for runtime configuration
+[west, "BLU_F", "conventional", ["ATLAS_zone_blufor_1"]] call ATLAS_fnc_core_configureSide;
+[east, "OPF_F", "insurgency", ["ATLAS_zone_opfor_1"]] call ATLAS_fnc_core_configureSide;
+[1.0] call ATLAS_fnc_core_setForceScale;
+call ATLAS_fnc_core_start;  // Begin ATLAS simulation
+```
+
+### 17.3 Scenario Presets
+
+Presets configure multiple CBA Settings at once to match common scenario types. The mission maker selects a preset, then fine-tunes individual settings.
+
+**Conventional War:**
+```
+OPCOM modes: both conventional
+CQB: medium garrison density
+Civilians: moderate density, low hostility
+Asymmetric: disabled (no IEDs)
+Logistics: full (resupply + reinforcement)
+Air: full (CAS, CAP, transport)
+C2 Tablet: all features enabled
+```
+
+**Insurgency:**
+```
+OPCOM: BLUFOR conventional, OPFOR insurgency
+CQB: heavy garrison density (urban defense)
+Civilians: high density, variable hostility
+Asymmetric: full (IEDs, VBIEDs, intel, cells)
+Logistics: BLUFOR full, OPFOR limited (cell-based)
+Air: BLUFOR only
+C2 Tablet: intel and SPOTREP emphasized
+```
+
+**Occupation:**
+```
+OPCOM: occupier = occupation mode, resistance = insurgency
+CQB: occupier heavy garrison
+Civilians: high density, hostility rises over time
+Asymmetric: resistance side only
+Logistics: occupier full, resistance scavenging
+Air: occupier only (air superiority)
+C2 Tablet: full for occupier, limited for resistance
+```
+
+**Custom:** All settings start at defaults, mission maker configures everything.
+
+### 17.4 CBA Settings — Runtime Tunable
+
+All ATLAS configuration goes through CBA Settings. This means:
+- Mission makers set defaults in `description.ext` or `cba_settings.sqf`
+- Server admins can override via server-side `cba_settings.sqf`
+- Admins can adjust settings at runtime via CBA Settings UI (Esc → Addon Options)
+- Settings changes take effect immediately — modules subscribe to CBA Settings change events
+
+**Settings hierarchy** (CBA's built-in priority system):
+```
+Default (code) → Mission (description.ext) → Server (cba_settings.sqf) → Runtime (admin UI)
+```
+
+**Complete CBA Settings tree:**
+
+```
+ATLAS - General
+  ├── Spawn Distance              [500-3000, default 1500, step 100]   (runtime tunable)
+  ├── Despawn Buffer              [100-500, default 300, step 50]      (runtime tunable)
+  ├── AI Density Multiplier       [0.25-3.0, default 1.0, step 0.25]  (runtime tunable)
+  ├── Max Spawned Groups          [5-200, default 50]                  (runtime tunable)
+  ├── Debug Mode                  [Off / Markers / Full]               (runtime tunable)
+  └── Simulation Speed            [0.5-2.0x, default 1.0]             (runtime tunable)
+
+ATLAS - OPCOM
+  ├── Decision Cycle Time         [15-300s, default 60]                (runtime tunable)
+  ├── Aggression Bias             [0.0-1.0, default 0.5]              (runtime tunable)
+  │     (0 = very defensive, 1 = very aggressive)
+  ├── Force Ratio Attack Threshold [1.0-4.0, default 1.5]             (runtime tunable)
+  │     (required friendly:enemy ratio to order attack)
+  ├── Reinforcement Request Threshold [0.1-0.8, default 0.4]          (runtime tunable)
+  │     (force loss % that triggers reinforcement request)
+  └── Cross-server Awareness      [On / Off, default On]              (mission setting)
+
+ATLAS - Logistics
+  ├── Enable Resupply             [Yes / No, default Yes]              (mission setting)
+  ├── Enable Reinforcements       [Yes / No, default Yes]             (mission setting)
+  ├── Reinforcement Pool          [0-1000, default 200]               (runtime tunable)
+  ├── Resupply Interval           [60-600s, default 180]              (runtime tunable)
+  ├── Convoy Escort               [Yes / No, default Yes]             (mission setting)
+  └── Player Resupply Enabled     [Yes / No, default Yes]             (mission setting)
+
+ATLAS - CQB
+  ├── Enable CQB                  [Yes / No, default Yes]              (mission setting)
+  ├── Garrison Density            [Light / Medium / Heavy, default Medium]  (runtime tunable)
+  ├── Garrison Radius             [100-1000m, default 500]             (runtime tunable)
+  ├── Garrison Faction Aware      [Yes / No, default Yes]              (mission setting)
+  │     (only garrison buildings in controlled territory)
+  └── Max Garrison Size           [2-12, default 6]                    (runtime tunable)
+
+ATLAS - Civilian
+  ├── Enable Civilians            [Yes / No, default Yes]              (mission setting)
+  ├── Density Multiplier          [0.0-3.0, default 1.0]              (runtime tunable)
+  ├── Enable Traffic              [Yes / No, default Yes]             (mission setting)
+  ├── Enable Interactions         [Yes / No, default Yes]             (mission setting)
+  ├── Hostility Decay Rate        [0.0-1.0, default 0.1]             (runtime tunable)
+  │     (how fast hostility fades over time)
+  └── Max Agents                  [5-50, default 20]                   (runtime tunable)
+
+ATLAS - Asymmetric
+  ├── Enable IEDs                 [Yes / No, default Yes]              (mission setting)
+  ├── Enable VBIEDs               [Yes / No, default Yes]              (mission setting)
+  ├── Enable Suicide Bombers      [Yes / No, default No]               (mission setting)
+  ├── IED Density                 [Low / Medium / High, default Medium] (runtime tunable)
+  ├── Cell Recruitment Rate       [0.1-2.0, default 1.0]              (runtime tunable)
+  └── Intel Gain Multiplier       [0.5-2.0, default 1.0]              (runtime tunable)
+
+ATLAS - C2 Tablet Features
+  ├── Enable CAS Request          [Yes / No, default Yes]              (runtime tunable)
+  ├── Enable Transport Request    [Yes / No, default Yes]              (runtime tunable)
+  ├── Enable Artillery Request    [Yes / No, default Yes]              (runtime tunable)
+  ├── Enable Resupply Request     [Yes / No, default Yes]              (runtime tunable)
+  ├── Enable SPOTREP              [Yes / No, default Yes]              (runtime tunable)
+  ├── Enable SITREP               [Yes / No, default Yes]              (runtime tunable)
+  ├── Enable PATROLREP            [Yes / No, default Yes]              (runtime tunable)
+  ├── Enable Force Overview       [Yes / No, default Yes]              (runtime tunable)
+  └── Enable Intel Display        [Yes / No, default Yes]              (runtime tunable)
+
+ATLAS - Performance
+  ├── Adaptive Spawn Distance     [Yes / No, default Yes]              (runtime tunable)
+  │     (auto-increase despawn radius when FPS drops)
+  ├── FPS Target                  [15-60, default 30]                  (runtime tunable)
+  ├── GC Delay                    [30-600s, default 120]               (runtime tunable)
+  ├── GC Corpses Per Frame        [1-10, default 3]                    (runtime tunable)
+  ├── HC Distribution             [Auto / Manual / Off, default Auto]  (mission setting)
+  └── Virtual Movement Budget     [1-20 profiles/frame, default 5]     (runtime tunable)
+
+ATLAS - Persistence
+  ├── Backend                     [PNS / PostgreSQL / Both, default PNS]  (mission setting)
+  ├── Auto-save Interval          [60-900s, default 300]                  (runtime tunable)
+  ├── Player Save on Disconnect   [Yes / No, default Yes]                 (mission setting)
+  └── Connection String           [string, default ""]                    (mission setting)
+```
+
+### 17.5 Adaptive Systems
+
+ATLAS can automatically adjust its own parameters based on runtime conditions. These are opt-in via CBA Settings.
+
+**Adaptive Spawn Distance:**
+
+```sqf
+// If server FPS drops below target, increase despawn radius to reduce spawned AI
+// If FPS is healthy, tighten back toward configured spawn distance
+ATLAS_fnc_core_adaptiveSpawn = {
+    private _fps = diag_fps;
+    private _target = ATLAS_setting_fpsTarget;          // CBA Setting
+    private _baseSpawn = ATLAS_setting_spawnDistance;    // CBA Setting
+    private _baseDespawn = _baseSpawn + ATLAS_setting_despawnBuffer;
+
+    if (_fps < _target * 0.8) then {
+        // FPS is 20%+ below target — widen despawn radius by 200m (max 1000m extra)
+        ATLAS_despawnRadius = (_baseDespawn + 200) min (_baseDespawn + 1000);
+        diag_log format ["[ATLAS][ADAPTIVE] FPS %1 below target %2, despawn radius → %3",
+            _fps, _target, ATLAS_despawnRadius];
+    } else {
+        if (_fps > _target * 1.2) then {
+            // FPS is 20%+ above target — tighten despawn toward base
+            ATLAS_despawnRadius = (_baseDespawn) max (ATLAS_despawnRadius - 100);
+        };
+    };
+};
+```
+
+**Adaptive AI Density:**
+
+```sqf
+// Scale number of spawned groups based on player count
+// More players = can handle more AI. Fewer players = reduce load.
+ATLAS_fnc_core_adaptiveDensity = {
+    private _playerCount = count allPlayers;
+    private _baseDensity = ATLAS_setting_aiDensity;     // CBA Setting (1.0 = normal)
+
+    // Scale: 1 player = 0.5x, 10 players = 1.0x, 20 players = 1.5x, 40 players = 2.0x
+    private _playerScale = linearConversion [1, 40, _playerCount, 0.5, 2.0, true];
+
+    ATLAS_effectiveDensity = _baseDensity * _playerScale;
+};
+```
+
+**OPCOM Self-Balancing:**
+
+OPCOM already has force ratio checks, but the adaptive system can also:
+- Detect stalemates (no objective changes for N cycles) and increase aggression
+- Detect one-sided steamrolls and boost the losing side's reinforcement rate
+- Shift operational tempo based on time-of-day (less aggressive at night for conventional forces)
+
+### 17.6 Auto-Detection: How It Works
+
+At mission start, `atlas_core` runs map analysis and generates objectives automatically. The mission maker controls how much they trust the auto-detection:
+
+**Setting: Auto-detect Objectives** (three modes)
+
+| Mode | Behavior |
+|------|----------|
+| **Full Auto** | Detect objectives, use them immediately. Zero manual work. |
+| **Suggest + Confirm** | Detect objectives, show them as editor markers at mission start. Admin confirms/removes/adds via admin panel before ATLAS activates. |
+| **Manual Only** | No auto-detection. Only `ATLAS_obj_custom_*` markers are used. |
+
+**What gets auto-detected:**
+
+```
+Map Analysis → Identify:
+  ├── Towns (>10 buildings in cluster) → "tactical" objectives
+  ├── Cities (>50 buildings) → "strategic" objectives
+  ├── Military bases (barracks, hangars, helipads) → "strategic" objectives
+  ├── Airfields (runways) → "strategic" objectives (air-relevant)
+  ├── Ports/harbors → "strategic" objectives (logistics-relevant)
+  ├── Crossroads (3+ road intersections nearby) → "tactical" objectives
+  ├── Hilltops (dominant terrain) → "tactical" objectives
+  └── Industrial areas (factories, fuel stations) → "tactical" objectives
+
+Priority auto-scored by:
+  ├── Size (larger = higher priority)
+  ├── Road connectivity (more roads = higher logistics value)
+  ├── Elevation (commanding terrain = higher military value)
+  ├── Building density (more buildings = more cover, CQB relevance)
+  └── Proximity to faction starting zones (closer to front = higher priority)
+```
+
+### 17.7 Comparison with ALiVE
+
+| Aspect | ALiVE | ATLAS |
+|--------|-------|-------|
+| **Minimum editor objects** | ~10 modules + sync lines | 1 module (optional) |
+| **Minimum setup time** | 30-60 minutes | 60 seconds |
+| **Objective definition** | Manually place mil/civ objective modules | Auto-detected, overridable, or manual |
+| **Force composition** | ORBAT config per placement module | Auto from faction + zone + multiplier |
+| **Runtime changes** | None — restart required | CBA Settings: most params live-tunable |
+| **Civilian areas** | Manually place civ module | Auto from building density |
+| **C2 features** | All or nothing | Per-feature toggle |
+| **Multi-side setup** | Duplicate all modules per side | One zone marker per side |
+| **Presets** | None | Conventional / Insurgency / Occupation / Custom |
+| **Adaptive performance** | None | Auto-adjust spawn distance, AI density based on FPS |
+| **Programmatic control** | Limited `description.ext` | Full: `description.ext` class + SQF API |
+| **Learning curve** | Steep | Quickstart = trivial, Standard = 5 min, Advanced = full power |
+
+---
+
+## 18. Coding Standards — No God Objects
+
+### 18.1 Hard Rules
 
 These rules exist specifically to prevent ALiVE's god-object anti-patterns from recurring. They are non-negotiable.
 
@@ -1161,7 +1512,7 @@ These rules exist specifically to prevent ALiVE's god-object anti-patterns from 
 | **No global variables beyond registries** | Only `ATLAS_*Registry`, `ATLAS_spatialGrid`, `ATLAS_is*` flags | ALiVE has 200+ `ALIVE_*` globals |
 | **Function naming** | `ATLAS_fnc_<module>_<verb><Noun>` | Clear, discoverable, grep-friendly |
 
-### 17.2 Function Design Principles
+### 18.2 Function Design Principles
 
 **Single Responsibility**: Each function does exactly one thing. If you can't describe what it does in one sentence without "and", split it.
 
@@ -1214,7 +1565,7 @@ ATLAS_fnc_logistics_processRequest = {
 };
 ```
 
-### 17.3 File Organization Pattern
+### 18.3 File Organization Pattern
 
 Every module follows this exact structure:
 
@@ -1232,7 +1583,7 @@ atlas_<module>/
     ...
 ```
 
-### 17.4 HashMap Contract Pattern
+### 18.4 HashMap Contract Pattern
 
 Every data structure has a documented "contract" — a creation function that defines the shape:
 
@@ -1271,13 +1622,13 @@ An agent implementing any function that reads a profile can look at `fn_create.s
 
 ---
 
-## 18. Detailed Module Internal Breakdowns
+## 19. Detailed Module Internal Breakdowns
 
 Each section below specifies every function an implementing agent needs to write, with its signature, responsibility, and expected size.
 
 ---
 
-### 18.1 `atlas_core` — Internal Structure
+### 19.1 `atlas_core` — Internal Structure
 
 ```
 atlas_core/fnc/
@@ -1308,6 +1659,20 @@ atlas_core/fnc/
   fn_markerCreate.sqf            # Create map marker with persistence tracking
   fn_markerUpdate.sqf            # Update marker properties
   fn_markerDelete.sqf            # Delete marker
+
+  # === MISSION CONFIGURATION ===
+  fn_settingsInit.sqf            # Register all CBA Settings (see §17.4)
+  fn_settingsApply.sqf           # Apply CBA Settings values to runtime variables
+  fn_settingsOnChanged.sqf       # CBA Settings change handler — propagate to modules
+  fn_configureSide.sqf           # SQF API: configure a side (faction, mode, zones)
+  fn_setForceScale.sqf           # SQF API: set force multiplier
+  fn_parseZoneMarkers.sqf        # Find ATLAS_zone_* markers, build zone registry
+  fn_parseConfigClass.sqf        # Read description.ext ATLAS class if present
+  fn_presetApply.sqf             # Apply scenario preset (conventional/insurgency/occupation)
+  fn_autoDetectObjectives.sqf    # Run sector analysis → generate objectives from map features
+  fn_adaptiveSpawn.sqf           # PFH: adjust spawn/despawn distance based on FPS
+  fn_adaptiveDensity.sqf         # PFH: adjust AI density based on player count
+  fn_start.sqf                   # SQF API: begin ATLAS simulation after configuration
 ```
 
 **Function signatures:**
@@ -1344,7 +1709,7 @@ atlas_core/fnc/
 
 ---
 
-### 18.2 `atlas_profile` — Internal Structure
+### 19.2 `atlas_profile` — Internal Structure
 
 ```
 atlas_profile/fnc/
@@ -1414,7 +1779,7 @@ atlas_profile/fnc/
 
 ---
 
-### 18.3 `atlas_opcom` — Internal Structure
+### 19.3 `atlas_opcom` — Internal Structure
 
 This is the most complex module. ALiVE's OPCOM is a 140KB monolith. ATLAS breaks it into ~20 focused functions.
 
@@ -1523,7 +1888,7 @@ ATLAS_fnc_opcom_plan = {
 
 ---
 
-### 18.4 `atlas_logistics` — Internal Structure
+### 19.4 `atlas_logistics` — Internal Structure
 
 ```
 atlas_logistics/fnc/
@@ -1577,7 +1942,7 @@ atlas_logistics/fnc/
 
 ---
 
-### 18.5 `atlas_air` — Internal Structure
+### 19.5 `atlas_air` — Internal Structure
 
 ```
 atlas_air/fnc/
@@ -1605,7 +1970,7 @@ atlas_air/fnc/
 
 ---
 
-### 18.6 `atlas_civilian` — Internal Structure
+### 19.6 `atlas_civilian` — Internal Structure
 
 ALiVE splits civilians across 4 modules with 20+ behavior functions. ATLAS consolidates but keeps behaviors as separate composable functions.
 
@@ -1698,7 +2063,7 @@ ATLAS_fnc_civ_behaviorInit = {
 
 ---
 
-### 18.7 `atlas_asymmetric` — Internal Structure
+### 19.7 `atlas_asymmetric` — Internal Structure
 
 ```
 atlas_asymmetric/fnc/
@@ -1744,7 +2109,7 @@ atlas_asymmetric/fnc/
 
 ---
 
-### 18.8 `atlas_persist` — Internal Structure
+### 19.8 `atlas_persist` — Internal Structure
 
 ```
 atlas_persist/fnc/
@@ -1819,7 +2184,7 @@ ATLAS_fnc_persist_pnsSave = {
 
 ---
 
-### 18.9 `atlas_c2` — Internal Structure
+### 19.9 `atlas_c2` — Internal Structure
 
 ALiVE's C2ISTAR is 157KB. ATLAS splits it into UI lifecycle, task management, and reporting.
 
@@ -1871,7 +2236,7 @@ atlas_c2/fnc/
 
 ---
 
-### 18.10 `atlas_support` — Internal Structure
+### 19.10 `atlas_support` — Internal Structure
 
 ```
 atlas_support/fnc/
@@ -1899,7 +2264,7 @@ atlas_support/fnc/
 
 ---
 
-### 18.11 `atlas_cqb` — Internal Structure
+### 19.11 `atlas_cqb` — Internal Structure
 
 ```
 atlas_cqb/fnc/
@@ -1919,7 +2284,7 @@ atlas_cqb/fnc/
 
 ---
 
-### 18.12 Utility Modules — Internal Structure
+### 19.12 Utility Modules — Internal Structure
 
 **`atlas_gc`:**
 ```
