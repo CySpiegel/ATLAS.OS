@@ -32,6 +32,7 @@
 22. [Asymmetric Player Operations & SpyderAddons Features](#22-asymmetric-player-ops)
 23. [Optional Mod Integration Philosophy](#23-optional-mod-integration)
 24. [Feature Parity Gap Analysis](#24-gap-analysis)
+25. [Visual Assets & Icon Specification](#25-visual-assets)
 
 ---
 
@@ -4680,6 +4681,230 @@ These are "nice to have" features that don't affect core simulation:
 | Player-side insurgency | §22.1 | Players AS insurgents with installations and command board |
 | Detection/incognito | §22.2 | Disguise mechanics for asymmetric player gameplay |
 | Ambient environment | §22.4 | Animals, cultural audio, prayer calls |
+
+---
+
+## 25. Visual Assets & Icon Specification
+
+### 25.1 Art Direction
+
+**Icons**: NATO/military tactical symbology style. Clean geometric shapes, limited color palette, monochrome where possible. Must be legible at 32x32. Reference: APP-6A military map symbols.
+
+**Main Logo**: Globe/Atlas-inspired motif (Atlas the Titan or globe/map theme) suggesting global theater operations. Clean, professional, recognizable at small sizes.
+
+**Color Palette**:
+- Primary: Dark slate (#2D3436) on transparent
+- BLUFOR: Blue (#0984E3)
+- OPFOR: Red (#D63031)
+- INDFOR: Green (#00B894)
+- Civilian: Yellow/Amber (#FDCB6E)
+- Neutral/System: White (#DFE6E9)
+- Danger/Alert: Orange (#E17055)
+
+### 25.2 Asset Pipeline
+
+```
+Source (PNG) → HEMTT build → Output (PAA)
+
+Source files live in each PBO's data/ directory:
+  atlas_core/data/icon_*.png      → atlas_core/data/icon_*.paa
+  atlas_c2/data/ui_*.png          → atlas_c2/data/ui_*.paa
+  atlas_core/data/logo.png        → atlas_core/data/logo.paa
+
+HEMTT automatically converts PNG → PAA during the build process.
+Source PNGs should be power-of-2 dimensions (32x32, 64x64, 128x128, 256x256, 512x512).
+All icons include an alpha channel for transparency.
+```
+
+### 25.3 Complete Asset Manifest
+
+#### Mod Identity (atlas_core)
+
+| File | Size | Description |
+|------|------|-------------|
+| `logo_atlas.png` | 512x512 | Main ATLAS.OS mod logo — globe/Atlas motif |
+| `logo_atlas_small.png` | 128x128 | Small version for in-game UI headers |
+| `logo_atlas_icon.png` | 32x32 | Tiny version for lists and compact displays |
+
+#### Editor Module Icons (atlas_core/data/)
+
+| File | Size | Description | Visual |
+|------|------|-------------|--------|
+| `icon_gamemaster.png` | 32x32 | Game Master module | Globe with command star |
+| `icon_mob.png` | 32x32 | Main Operating Base | Large square with flag, NATO base symbol |
+| `icon_fob.png` | 32x32 | Forward Operating Base | Medium square with fortification marks |
+| `icon_cop.png` | 32x32 | Combat Outpost | Small square with shield |
+| `icon_pb.png` | 32x32 | Patrol Base | Small triangle with patrol arc |
+| `icon_op.png` | 32x32 | Observation Post | Eye/binocular symbol |
+| `icon_objective.png` | 32x32 | Objective module | Diamond with crosshair |
+| `icon_placement.png` | 32x32 | Military Placement | NATO unit symbol (rectangle with X) |
+| `icon_cqb.png` | 32x32 | CQB Zone | Building silhouette with crosshair |
+| `icon_civilian.png` | 32x32 | Civilian Zone | Person silhouette (civilian) |
+| `icon_exclusion.png` | 32x32 | Exclusion Zone | Circle with X (prohibited) |
+| `icon_depot.png` | 32x32 | Supply Depot | Box/crate with arrow |
+| `icon_ied.png` | 32x32 | IED Zone | Explosion/warning triangle |
+
+#### Editor Category Icons (atlas_core/data/)
+
+| File | Size | Description |
+|------|------|-------------|
+| `cat_atlas.png` | 32x32 | "ATLAS" main category — mod logo simplified |
+| `cat_bases.png` | 32x32 | "ATLAS - Bases" category — base symbol |
+| `cat_asymmetric.png` | 32x32 | "ATLAS - Asymmetric" category — irregular warfare symbol |
+
+#### Map Marker Icons (atlas_core/data/)
+
+| File | Size | Description | Visual |
+|------|------|-------------|--------|
+| `marker_mob.png` | 64x64 | MOB map marker | NATO base symbol, large |
+| `marker_fob.png` | 64x64 | FOB map marker | NATO base symbol, medium |
+| `marker_cop.png` | 64x64 | COP map marker | NATO base symbol, small, fortified |
+| `marker_pb.png` | 64x64 | PB map marker | Patrol base symbol |
+| `marker_op.png` | 64x64 | OP map marker | Observation post symbol |
+| `marker_obj_strategic.png` | 64x64 | Strategic objective | Large diamond, filled |
+| `marker_obj_tactical.png` | 64x64 | Tactical objective | Small diamond, outlined |
+| `marker_obj_civilian.png` | 64x64 | Civilian objective | Diamond with civilian symbol |
+| `marker_supply_route.png` | 64x64 | Supply route | Dashed line with arrow |
+| `marker_frontline.png` | 64x64 | Frontline indicator | Opposing arrows |
+| `marker_ied.png` | 64x64 | Known IED location | Explosion warning |
+| `marker_intel.png` | 64x64 | Intel report location | Eye with question mark |
+| `marker_contact.png` | 64x64 | Enemy contact report | Red diamond with unit type |
+
+#### C2 Tablet UI Icons (atlas_c2/data/)
+
+| File | Size | Description |
+|------|------|-------------|
+| `ui_tab_map.png` | 32x32 | Map tab — map symbol |
+| `ui_tab_forces.png` | 32x32 | Forces tab — unit stack symbol |
+| `ui_tab_tasks.png` | 32x32 | Tasks tab — clipboard/checklist |
+| `ui_tab_reports.png` | 32x32 | Reports tab — document with lines |
+| `ui_tab_support.png` | 32x32 | Support tab — radio/headset |
+| `ui_tab_intel.png` | 32x32 | Intel tab — eye/magnifier |
+| `ui_tab_bases.png` | 32x32 | Bases tab — base symbol with supply bars |
+| `ui_tab_missions.png` | 32x32 | Missions tab — target/bullseye |
+| `ui_tab_settings.png` | 32x32 | Settings tab — gear/cog |
+| `ui_layer_influence.png` | 32x32 | Toggle influence heatmap — gradient |
+| `ui_layer_frontline.png` | 32x32 | Toggle frontline — opposing arrows |
+| `ui_layer_territory.png` | 32x32 | Toggle territory shading — filled regions |
+| `ui_layer_supply.png` | 32x32 | Toggle supply routes — dashed lines |
+| `ui_btn_cas.png` | 32x32 | Request CAS — aircraft diving |
+| `ui_btn_transport.png` | 32x32 | Request transport — helicopter |
+| `ui_btn_artillery.png` | 32x32 | Request artillery — cannon/explosion |
+| `ui_btn_resupply.png` | 32x32 | Request resupply — parachute crate |
+| `ui_btn_spotrep.png` | 32x32 | Submit SPOTREP — binoculars |
+| `ui_btn_sitrep.png` | 32x32 | Submit SITREP — document + map |
+| `ui_btn_patrolrep.png` | 32x32 | Submit PATROLREP — boots/footprints |
+| `ui_btn_accept.png` | 32x32 | Accept mission — checkmark |
+| `ui_btn_decline.png` | 32x32 | Decline mission — X mark |
+
+#### Force Type Icons (atlas_core/data/)
+
+NATO APP-6A style unit type symbols:
+
+| File | Size | Description | NATO Symbol |
+|------|------|-------------|-------------|
+| `force_infantry.png` | 32x32 | Infantry | X in rectangle |
+| `force_motorized.png` | 32x32 | Motorized | X in rectangle + wheel |
+| `force_mechanized.png` | 32x32 | Mechanized | X in rectangle + track |
+| `force_armor.png` | 32x32 | Armor | Oval/ellipse in rectangle |
+| `force_air_rotary.png` | 32x32 | Rotary wing | Helicopter symbol |
+| `force_air_fixed.png` | 32x32 | Fixed wing | Aircraft symbol |
+| `force_naval.png` | 32x32 | Naval | Anchor/ship hull |
+| `force_static.png` | 32x32 | Static weapons | Crosshair/gun |
+| `force_recon.png` | 32x32 | Reconnaissance | X with eye |
+| `force_artillery.png` | 32x32 | Artillery | Dot in rectangle |
+| `force_logistics.png` | 32x32 | Logistics/Supply | Rectangle with wheel |
+
+#### Supply Resource Icons (atlas_logistics/data/)
+
+| File | Size | Description | Visual |
+|------|------|-------------|--------|
+| `supply_ammo.png` | 32x32 | Ammunition | Bullet/magazine |
+| `supply_fuel.png` | 32x32 | Fuel | Fuel can/droplet |
+| `supply_food.png` | 32x32 | Food | Ration pack |
+| `supply_water.png` | 32x32 | Water | Water droplet/canteen |
+| `supply_medical.png` | 32x32 | Medical supplies | Cross/medical symbol |
+| `supply_construction.png` | 32x32 | Construction materials | Hammer/barrier |
+
+#### Mission Type Icons (atlas_c2/data/)
+
+| File | Size | Description | Visual |
+|------|------|-------------|--------|
+| `mission_patrol.png` | 32x32 | Patrol mission | Circular arrow path |
+| `mission_recon.png` | 32x32 | Recon mission | Binoculars/eye |
+| `mission_assault.png` | 32x32 | Assault mission | Arrow into objective |
+| `mission_defend.png` | 32x32 | Defend mission | Shield |
+| `mission_supply.png` | 32x32 | Supply run | Truck with arrow |
+| `mission_casevac.png` | 32x32 | CASEVAC | Cross with helicopter |
+| `mission_escort.png` | 32x32 | Convoy escort | Vehicle with shield |
+| `mission_establish_op.png` | 32x32 | Establish OP | Eye + construction |
+| `mission_establish_pb.png` | 32x32 | Establish PB | Base + construction |
+| `mission_qrf.png` | 32x32 | QRF | Lightning bolt/rapid deploy |
+| `mission_hearts_minds.png` | 32x32 | Hearts & Minds | Heart + handshake |
+| `mission_ied_clearance.png` | 32x32 | IED Clearance | Swept path symbol |
+
+#### Status/State Icons (atlas_core/data/)
+
+| File | Size | Description |
+|------|------|-------------|
+| `status_active.png` | 32x32 | Active/operational — green circle |
+| `status_contested.png` | 32x32 | Contested — yellow/red split circle |
+| `status_captured.png` | 32x32 | Captured — filled circle with flag |
+| `status_destroyed.png` | 32x32 | Destroyed — X over circle |
+| `status_abandoned.png` | 32x32 | Abandoned — empty circle, dashed |
+| `status_supply_ok.png` | 32x32 | Supply adequate — green bar |
+| `status_supply_low.png` | 32x32 | Supply low — yellow bar |
+| `status_supply_critical.png` | 32x32 | Supply critical — red bar |
+
+#### Insurgent Command Board Icons (atlas_asymmetric/data/)
+
+| File | Size | Description |
+|------|------|-------------|
+| `ins_recruit_hq.png` | 32x32 | Recruitment HQ installation |
+| `ins_weapons_depot.png` | 32x32 | Weapons depot installation |
+| `ins_ied_factory.png` | 32x32 | IED factory installation |
+| `ins_ambush_point.png` | 32x32 | Ambush point installation |
+| `ins_propaganda.png` | 32x32 | Propaganda center installation |
+| `ins_safe_house.png` | 32x32 | Safe house installation |
+| `ins_cmd_board.png` | 32x32 | Command board icon |
+
+### 25.4 Asset Count Summary
+
+| Category | Count |
+|----------|-------|
+| Mod identity (logos) | 3 |
+| Editor module icons | 13 |
+| Editor category icons | 3 |
+| Map marker icons | 13 |
+| C2 tablet UI icons | 21 |
+| Force type icons | 11 |
+| Supply resource icons | 6 |
+| Mission type icons | 12 |
+| Status/state icons | 8 |
+| Insurgent command board | 7 |
+| **Total** | **97** |
+
+### 25.5 Generation and Build
+
+Source PNGs are created with NATO-style military symbology. During the HEMTT build process, PNGs in each PBO's `data/` directory are automatically converted to PAA format.
+
+```
+Source directory structure:
+  atlas_core/data/
+    icon_*.png, marker_*.png, force_*.png, status_*.png, cat_*.png, logo_*.png
+  atlas_c2/data/
+    ui_*.png, mission_*.png
+  atlas_logistics/data/
+    supply_*.png
+  atlas_asymmetric/data/
+    ins_*.png
+```
+
+All source PNGs must be:
+- Power-of-2 dimensions (32x32, 64x64, 128x128, 256x256, 512x512)
+- RGBA with alpha channel for transparency
+- sRGB color space
+- Crisp at target size (no anti-aliasing artifacts at 32x32)
 
 ---
 
