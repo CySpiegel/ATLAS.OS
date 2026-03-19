@@ -1,6 +1,6 @@
 # ATLAS.OS — Architecture Design Document
 ### Advanced Tactical Lifecycle & Asymmetric Simulation Operating System
-**Version:** 0.1.0-DRAFT
+**Version:** 0.2.0-DRAFT
 **Date:** 2026-03-18
 **Supersedes:** ALiVE.OS (Arma 3)
 
@@ -15,10 +15,15 @@
 5. [Core Engine: Data Layer](#5-core-engine-data-layer)
 6. [Scheduling Strategy: Scheduled vs Unscheduled](#6-scheduling-strategy)
 7. [Event-Driven Architecture](#7-event-driven-architecture)
-8. [Module Designs](#8-module-designs)
-9. [Performance Improvement Projections](#9-performance-improvement-projections)
-10. [Module Feature Parity Matrix](#10-module-feature-parity-matrix)
-11. [Technical Specifications](#11-technical-specifications)
+8. [Hosting Models & Headless Client Distribution](#8-hosting-models)
+9. [Module Architecture — 16 PBOs](#9-module-architecture)
+10. [Module Specifications](#10-module-specifications)
+11. [Cross-Server Persistence Architecture](#11-cross-server-persistence)
+12. [Event Taxonomy](#12-event-taxonomy)
+13. [Module Initialization Order](#13-initialization-order)
+14. [PBO Directory Structure](#14-pbo-directory-structure)
+15. [Performance Projections](#15-performance-projections)
+16. [Key Architectural Decisions](#16-architectural-decisions)
 
 ---
 
@@ -28,11 +33,16 @@ ATLAS.OS is a ground-up redesign of the ALiVE military simulation framework for 
 
 **Key design goals:**
 
-- **Feature parity** with every ALiVE module (OPCOM, LOGCOM, CQB, Civilian, C2ISTAR, persistence, etc.)
-- **2-6x performance improvement** through native data structures and elimination of polling loops
+- **Feature parity** with every core ALiVE module (OPCOM, LOGCOM, CQB, Civilian, C2ISTAR, persistence, etc.)
+- **Significant performance improvement** through native data structures, spatial indexing, and elimination of polling loops
 - **Event-driven core** replacing ALiVE's spin-wait architecture in unscheduled contexts
 - **Scheduled execution** only where large-batch AI computation genuinely benefits from yielding
+- **Cross-server persistence** via PostgreSQL — multiple Arma 3 servers sharing theater state
+- **All hosting models** — single player, listen server, dedicated server, and dedicated server with headless clients
+- **Headless client AI distribution** — automatic load-balanced transfer of spawned AI groups to connected headless clients
 - **Clean, maintainable architecture** replacing ALiVE's fragile index-based data access
+
+**Module count:** ALiVE's 63+ modules consolidated into **16 cohesive PBOs**.
 
 ---
 
@@ -40,7 +50,7 @@ ATLAS.OS is a ground-up redesign of the ALiVE military simulation framework for 
 
 ### 2.1 ALiVE Module Inventory
 
-ALiVE is organized into the following major modules, each a separate PBO addon:
+ALiVE is organized into 63+ separate PBO addons. The core modules:
 
 | ALiVE Module | Function |
 |---|---|
@@ -48,27 +58,37 @@ ALiVE is organized into the following major modules, each a separate PBO addon:
 | **sys_profile** | Virtual unit profile system — the heart of ALiVE |
 | **sys_profileHandler** | Creates, destroys, and manages unit profiles |
 | **mil_OPCOM** | Operational Commander — AI strategic decision-making |
+| **mil_command** | Tactical AI behaviors (patrol, garrison, ambush) |
 | **mil_CQB** | Close Quarters Battle — garrison spawning |
 | **mil_logistics (LOGCOM)** | Logistics Commander — supply, reinforcement |
 | **mil_placement** | Military unit placement on map at mission start |
 | **mil_ato** | Air Tasking Order — AI air operations |
+| **mil_convoy** | Convoy operations and escort |
+| **mil_ied** | IED/VBIED/suicide bomber placement |
+| **mil_intelligence** | Intelligence gathering and processing |
 | **civ_population** | Civilian ambient population |
 | **civ_placement** | Civilian placement and density |
-| **sys_orbatcreator** | Order of Battle creator tool |
-| **sys_data_couchdb / sys_data_pns** | Persistence backends (CouchDB / Profile Namespace) |
-| **sys_marker** | Map marker management |
-| **sys_statistics** | Player statistics tracking |
+| **amb_civ_command** | Civilian AI behaviors (20+ behavior functions) |
+| **amb_civ_population** | Civilian interaction system |
+| **C2ISTAR** | Command, Control, Intelligence tablet interface |
+| **sys_data_couchdb / sys_data_pns** | Persistence backends |
 | **sup_combatsupport** | Player-requested CAS, transport, artillery |
 | **sup_multispawn** | Multiple insertion points |
 | **sup_player_resupply** | Player logistics requests |
-| **sys_adminactions** | Admin menu and actions |
-| **sys_logistics** | Object logistics (cargo/sling loading abstraction) |
-| **sys_patrolrep / sys_spotrep / sys_sitrep** | Reporting systems (PATROLREP/SPOTREP/SITREP) |
-| **sys_GC** | Garbage collection for dead units/vehicles |
-| **sys_AI** | AI skill and behavior management |
-| **sys_weather** | Weather persistence |
+| **sup_group_manager** | Squad management |
 | **sys_tasks** | Task assignment framework |
-| **C2ISTAR** | Command, Control, Intelligence module (tablet interface) |
+| **sys_spotrep / sys_sitrep / sys_patrolrep** | Reporting systems |
+| **sys_GC** | Garbage collection |
+| **sys_aiskill** | AI skill management |
+| **sys_weather** | Weather persistence |
+| **sys_marker** | Map marker management |
+| **sys_statistics** | Player statistics (42 files) |
+| **sys_adminactions** | Admin/debug tools |
+| **sys_orbatcreator** | ORBAT creator (312KB) |
+| **fnc_analysis** | Map sector analysis (50+ functions) |
+| **fnc_strategic** | Cluster detection, target finding |
+
+Plus ~30 additional modules for UI, assets, compatibility, compositions, and group definitions.
 
 ### 2.2 ALiVE's Custom Hash Implementation
 
@@ -87,7 +107,7 @@ _keyIndex = (_hash select 1) find "name";
 _value = (_hash select 2) select _keyIndex;
 ```
 
-**Problems with this approach:**
+**Problems:**
 
 1. **O(n) lookup time** — Every value access requires a linear `find` across the keys array
 2. **Index-based fragility** — All code depends on array position; any structural change breaks everything
@@ -104,7 +124,6 @@ ALiVE runs most of its core logic in the **scheduled environment** (using `spawn
 // Typical ALiVE main loop pattern
 [] spawn {
     while {true} do {
-        // Process all profiles
         {
             _profile = _x;
             // ... heavy computation ...
@@ -162,8 +181,6 @@ Real World (Spawned)          Virtual World (Data Only)
 
 ### 3.2 Measured Data Structure Performance (Arma 3 Engine Benchmarks)
 
-From the Bohemia Interactive Code Optimisation wiki:
-
 | Operation | Native HashMap | ALiVE Dual-Array "Hash" | ALiVE Nested-Array Format |
 |---|---|---|---|
 | **Key-Value Lookup** | **0.0018ms** | 0.0038ms | 0.0116ms |
@@ -171,8 +188,6 @@ From the Bohemia Interactive Code Optimisation wiki:
 | **100 lookups** | 0.18ms | 0.38ms | 1.16ms |
 | **1,000 lookups** | 1.8ms | 3.8ms | 11.6ms |
 | **10,000 lookups** | 18ms | 38ms | 116ms |
-
-**With ALiVE performing thousands of hash lookups per cycle across all its systems, switching to native HashMap alone yields a 2-6x speedup on data access.**
 
 ### 3.3 Scheduled Environment Overhead
 
@@ -183,11 +198,6 @@ The Arma 3 scheduled environment:
 - `sleep` does NOT guarantee timing — under load, `sleep 1` can take 5-30 seconds
 - `canSuspend` returns true — scripts can be interrupted at any `sleep`, `waitUntil`, or between statements
 
-**ALiVE's reliance on scheduled execution means:**
-- Critical OPCOM decisions can be delayed by scheduler congestion
-- Data can change between suspension points, causing race conditions
-- No control over execution priority — a garbage collection script competes with OPCOM
-
 ---
 
 ## 4. ATLAS.OS Architecture Overview
@@ -195,33 +205,39 @@ The Arma 3 scheduled environment:
 ### 4.1 High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        ATLAS.OS Core                            │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                    Event Bus (CBA)                        │  │
-│  │  publish/subscribe • namespaced • typed payloads          │  │
-│  └──────────┬──────────────┬──────────────┬─────────────────┘  │
-│             │              │              │                      │
-│  ┌──────────▼───┐  ┌──────▼──────┐  ┌───▼────────────┐        │
-│  │  Data Layer  │  │  Scheduler  │  │  Module Loader  │        │
-│  │  (HashMaps)  │  │  Manager    │  │  & Registry     │        │
-│  └──────────────┘  └─────────────┘  └────────────────┘        │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│                     Module Layer                                │
-│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────┐    │
-│  │ OPCOM  │ │PROFILER│ │ LOGCOM │ │  CQB   │ │ CIVILIAN │    │
-│  └────────┘ └────────┘ └────────┘ └────────┘ └──────────┘    │
-│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────┐    │
-│  │  ATO   │ │ C2ISTR │ │PERSIST │ │  GC    │ │ SUPPORT  │    │
-│  └────────┘ └────────┘ └────────┘ └────────┘ └──────────┘    │
-├─────────────────────────────────────────────────────────────────┤
-│                   Integration Layer                             │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐               │
-│  │  CBA A3    │  │  Extension  │  │  Network    │               │
-│  │  Framework  │  │  Bridge     │  │  Sync Layer │               │
-│  └────────────┘  └────────────┘  └────────────┘               │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                          ATLAS.OS Core                                │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │                      Event Bus (CBA)                           │  │
+│  │   publish/subscribe • namespaced • typed payloads              │  │
+│  └────────┬──────────────┬──────────────┬────────────────────────┘  │
+│           │              │              │                             │
+│  ┌────────▼────┐  ┌──────▼──────┐  ┌───▼──────────┐  ┌───────────┐ │
+│  │  Data Layer │  │  Scheduler  │  │  Module      │  │ HC        │ │
+│  │  (HashMaps) │  │  Manager    │  │  Loader &    │  │ Distrib.  │ │
+│  │  + Spatial  │  │  (PFH/      │  │  Registry    │  │ Manager   │ │
+│  │    Grid     │  │   Spawn)    │  │              │  │           │ │
+│  └─────────────┘  └─────────────┘  └──────────────┘  └───────────┘ │
+│                                                                       │
+├───────────────────────────────────────────────────────────────────────┤
+│                        Module Layer                                    │
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────┐           │
+│  │ OPCOM  │ │PROFILE │ │LOGIST. │ │  CQB   │ │ CIVILIAN │           │
+│  └────────┘ └────────┘ └────────┘ └────────┘ └──────────┘           │
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────┐           │
+│  │  AIR   │ │  C2    │ │PERSIST │ │  GC    │ │ASYMMETRIC│           │
+│  └────────┘ └────────┘ └────────┘ └────────┘ └──────────┘           │
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐                        │
+│  │SUPPORT │ │  AI    │ │ STATS  │ │ ADMIN  │                        │
+│  └────────┘ └────────┘ └────────┘ └────────┘                        │
+├───────────────────────────────────────────────────────────────────────┤
+│                      Integration Layer                                 │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────────┐ │
+│  │  CBA A3    │  │  Extension  │  │  Network    │  │  HC Transfer   │ │
+│  │  Framework  │  │  Bridge     │  │  Sync Layer │  │  Layer         │ │
+│  │            │  │  (atlas_db) │  │  (JIP/PV)   │  │  (AI Offload)  │ │
+│  └────────────┘  └────────────┘  └────────────┘  └────────────────┘ │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 4.2 Core Design Principles
@@ -233,6 +249,8 @@ The Arma 3 scheduled environment:
 5. **State Machines** — CBA state machines replace hand-rolled FSM loops for AI commander logic.
 6. **Immutable Event Payloads** — Events carry snapshots, preventing race conditions.
 7. **Modular Registration** — Modules self-register capabilities; core has zero knowledge of module internals.
+8. **Hosting-Agnostic** — All systems detect and adapt to the hosting model (SP, listen, dedicated, HC).
+9. **HC-Aware AI** — Spawned AI groups are automatically distributed to headless clients for load balancing.
 
 ---
 
@@ -252,7 +270,7 @@ private _profile = createHashMapFromArray [
     ["pos",        [4500, 5200, 0]],
     ["waypoints",  []],
     ["damage",     createHashMapFromArray [["hull", 1], ["engine", 1]]],
-    ["state",      "virtual"],    // "virtual" | "spawned" | "despawning"
+    ["state",      "virtual"],    // "virtual" | "spawning" | "spawned" | "despawning"
     ["cargo",      []],
     ["groupData",  createHashMapFromArray [
         ["behaviour", "AWARE"],
@@ -260,11 +278,13 @@ private _profile = createHashMapFromArray [
         ["formation", "WEDGE"]
     ]],
     ["_lastUpdate", serverTime],
-    ["_gridCell",   [45, 52]]     // spatial index reference
+    ["_gridCell",   [45, 52]],    // spatial index reference
+    ["_dirty",      false],
+    ["_hcOwner",    0]            // 0 = server, >0 = HC clientOwner ID
 ];
 ```
 
-**Comparison with ALiVE access patterns:**
+**Comparison:**
 
 ```sqf
 // ALiVE — fragile, slow (0.0116ms per access)
@@ -275,8 +295,6 @@ _side = _profile get "side";
 ```
 
 ### 5.2 Registry System
-
-Central registries are HashMaps of HashMaps, keyed by entity ID:
 
 ```sqf
 // Global registries
@@ -289,7 +307,7 @@ ATLAS_moduleRegistry     = createHashMap;  // moduleName -> module config HashMa
 ATLAS_profileRegistry set [_id, _profile];
 private _profile = ATLAS_profileRegistry get "ATLAS_P_001";
 
-// Efficient iteration — native forEach on HashMap
+// Efficient iteration
 {
     private _id = _x;
     private _profile = _y;
@@ -299,32 +317,28 @@ private _profile = ATLAS_profileRegistry get "ATLAS_P_001";
 
 ### 5.3 Spatial Index — Grid-Based Partitioning
 
-**This is the single biggest performance improvement over ALiVE.**
-
-ALiVE checks every profile against every player every cycle — O(n×m). ATLAS.OS uses a spatial grid:
-
 ```sqf
-// Grid configuration
-#define ATLAS_GRID_SIZE 500  // 500m cells (tunable)
+#define ATLAS_GRID_SIZE 500  // 500m cells
 
-// Spatial grid — HashMap of grid coordinates to arrays of profile IDs
+// Spatial grid — HashMap of grid coordinates to typed buckets
 ATLAS_spatialGrid = createHashMap;
+// Key: str [cx, cy]
+// Value: HashMap { "profiles"→[], "objectives"→[], "buildings"→[], "ieds"→[], "civilians"→[] }
 
-// Insert profile into grid
 ATLAS_fnc_gridInsert = {
-    params ["_profile"];
-    private _pos = _profile get "pos";
+    params ["_entityId", "_entityType", "_pos"];
     private _cell = [floor ((_pos#0) / ATLAS_GRID_SIZE), floor ((_pos#1) / ATLAS_GRID_SIZE)];
-    _profile set ["_gridCell", _cell];
     private _key = str _cell;
-    private _bucket = ATLAS_spatialGrid getOrDefault [_key, []];
-    _bucket pushBack (_profile get "id");
+    private _bucket = ATLAS_spatialGrid getOrDefault [_key, createHashMap];
+    private _list = _bucket getOrDefault [_entityType, []];
+    _list pushBack _entityId;
+    _bucket set [_entityType, _list];
     ATLAS_spatialGrid set [_key, _bucket];
+    _cell
 };
 
-// Query: get all profiles near a position within radius
 ATLAS_fnc_gridQuery = {
-    params ["_pos", "_radius"];
+    params ["_pos", "_radius", ["_entityType", "profiles"]];
     private _cellRadius = ceil (_radius / ATLAS_GRID_SIZE);
     private _centerX = floor ((_pos#0) / ATLAS_GRID_SIZE);
     private _centerY = floor ((_pos#1) / ATLAS_GRID_SIZE);
@@ -333,30 +347,45 @@ ATLAS_fnc_gridQuery = {
     for "_dx" from -_cellRadius to _cellRadius do {
         for "_dy" from -_cellRadius to _cellRadius do {
             private _key = str [_centerX + _dx, _centerY + _dy];
-            private _bucket = ATLAS_spatialGrid getOrDefault [_key, []];
-            _results append _bucket;
+            private _bucket = ATLAS_spatialGrid getOrDefault [_key, createHashMap];
+            _results append (_bucket getOrDefault [_entityType, []]);
         };
     };
     _results
 };
+
+ATLAS_fnc_gridMove = {
+    params ["_entityId", "_entityType", "_oldCell", "_newCell"];
+    if (_oldCell isEqualTo _newCell) exitWith {};
+
+    private _oldKey = str _oldCell;
+    private _oldBucket = ATLAS_spatialGrid getOrDefault [_oldKey, createHashMap];
+    private _oldList = _oldBucket getOrDefault [_entityType, []];
+    _oldList deleteAt (_oldList find _entityId);
+
+    private _newKey = str _newCell;
+    private _newBucket = ATLAS_spatialGrid getOrDefault [_newKey, createHashMap];
+    private _newList = _newBucket getOrDefault [_entityType, []];
+    _newList pushBack _entityId;
+    _newBucket set [_entityType, _newList];
+    ATLAS_spatialGrid set [_newKey, _newBucket];
+
+    ["atlas_grid_cellUpdated", [_oldCell, _newCell, _entityId, _entityType]] call CBA_fnc_localEvent;
+};
 ```
 
-**Performance impact:**
+**Performance comparison:**
 
-| Scenario | ALiVE: Distance Checks (n×m) | ATLAS.OS: Distance Checks (grid candidates) | Reduction |
+| Scenario | ALiVE Distance Checks | ATLAS.OS Distance Checks | Reduction |
 |---|---|---|---|
-| 200 profiles, 10 players | 200×10 = **2,000** | ~30 candidates (avg ~3/player × 10) | **~67x fewer** |
-| 500 profiles, 20 players | 500×20 = **10,000** | ~60 candidates (avg ~3/player × 20) | **~167x fewer** |
-| 1000 profiles, 40 players | 1000×40 = **40,000** | ~120 candidates (avg ~3/player × 40) | **~333x fewer** |
-
-**How it works**: ALiVE computes distance from every profile to every player (O(n×m)). ATLAS.OS first uses the spatial grid to find only the ~3 profiles per player that are actually in nearby cells, then performs precise distance checks on just those candidates. Both sides do the same 0.005ms distance calculation — the grid just eliminates 99%+ of them.
+| 200 profiles, 10 players | 2,000 | ~30 | ~67x fewer |
+| 500 profiles, 20 players | 10,000 | ~60 | ~167x fewer |
+| 1000 profiles, 40 players | 40,000 | ~120 | ~333x fewer |
 
 ### 5.4 Profile ID Generation
 
 ```sqf
-// Monotonic counter — simple, fast, guaranteed unique on server
 ATLAS_profileCounter = 0;
-
 ATLAS_fnc_nextProfileID = {
     ATLAS_profileCounter = ATLAS_profileCounter + 1;
     format ["ATLAS_P_%1", ATLAS_profileCounter]
@@ -377,109 +406,44 @@ ATLAS_fnc_nextProfileID = {
 │     YES ──► Does it need to yield to avoid frame lag?   │
 │                YES ──► SCHEDULED (spawn) ✓              │
 │                NO  ──► UNSCHEDULED (call) ✓             │
-│     NO  ──► Is it event-reactive / time-critical?       │
-│                YES ──► UNSCHEDULED (call) ✓             │
-│                NO  ──► UNSCHEDULED (call) ✓             │
+│     NO  ──► UNSCHEDULED (call) ✓                        │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 Unscheduled (Default for Most Systems)
-
-Runs via `call`, `CBA_fnc_addPerFrameHandler`, or CBA event handlers. **Cannot be suspended.** Executes within a single frame. Ideal for:
+### 6.2 Unscheduled Systems
 
 | System | Why Unscheduled |
 |---|---|
-| **Event handlers** | Must react immediately, cannot be interrupted |
-| **Spawn/despawn triggers** | Player proximity detection needs consistent state |
-| **Profile state updates** | Small, frequent updates that must be atomic |
-| **CQB garrison management** | Must spawn units atomically when player enters |
-| **Garbage collection** | Process a few entities per frame via PFH, not bulk |
-| **Network sync** | publicVariable handlers run unscheduled already |
-| **UI/C2ISTAR updates** | Must respond to player input immediately |
+| Event handlers | Must react immediately |
+| Spawn/despawn triggers | Need consistent state |
+| Profile state updates | Must be atomic |
+| CQB garrison management | Atomic spawning |
+| Garbage collection | PFH budget, few per frame |
+| Network sync | publicVariable runs unscheduled |
+| UI/C2 updates | Immediate response to input |
+| HC distribution | Group transfer must be atomic |
 
-**Implementation pattern — Per-Frame Handler with budget:**
-
-```sqf
-// Process N profiles per frame instead of all-at-once in scheduled
-private _perFrameHandler = [{
-    params ["_args"];
-    _args params ["_queue"];
-
-    if (_queue isEqualTo []) exitWith {};
-
-    // Process up to 5 profiles per frame (budget: ~1ms)
-    private _budget = 5 min (count _queue);
-    for "_i" from 1 to _budget do {
-        private _id = _queue deleteAt 0;
-        private _profile = ATLAS_profileRegistry get _id;
-        if (!isNil "_profile") then {
-            [_profile] call ATLAS_fnc_updateProfilePosition;
-        };
-    };
-}, 0, [_profileQueue]] call CBA_fnc_addPerFrameHandler;
-```
-
-### 6.3 Scheduled (Only for Heavy Computation)
-
-Runs via `spawn`. **Can be suspended.** Used only when:
-- Processing 100+ entities in a single batch
-- Complex AI decision-making (OPCOM scoring, pathfinding)
-- Persistence save/load operations (large data serialization)
+### 6.3 Scheduled Systems
 
 | System | Why Scheduled |
 |---|---|
-| **OPCOM strategic planning** | Scores all objectives × available forces — heavy |
-| **Bulk profile movement** | Moving hundreds of virtual profiles along paths |
-| **Persistence serialization** | Converting entire world state to storable format |
-| **Initial placement** | Mission start: creating hundreds of profiles |
-| **ORBAT analysis** | Parsing config trees for faction composition |
+| OPCOM strategic planning | Heavy: all objectives × forces |
+| Bulk profile movement | Hundreds of virtual profiles |
+| Persistence serialization | Large data conversion |
+| Initial placement | Creates hundreds of profiles |
+| Map sector analysis | One-time startup |
 
-**Implementation pattern — Chunked processing with yield:**
-
-```sqf
-// OPCOM decision cycle — scheduled, yields every N iterations
-[] spawn {
-    while {ATLAS_OPCOM_running} do {
-        private _objectives = values ATLAS_objectiveRegistry;
-        private _count = 0;
-
-        {
-            private _objective = _x;
-            [_objective] call ATLAS_fnc_OPCOM_scoreObjective;
-
-            _count = _count + 1;
-            if (_count % 20 == 0) then {
-                sleep 0.01; // Yield to scheduler every 20 objectives
-            };
-        } forEach _objectives;
-
-        // Make decisions based on scored objectives
-        call ATLAS_fnc_OPCOM_allocateForces;
-
-        // Wait for next cycle — but EVENT-DRIVEN wake is preferred
-        // (see Event-Driven Architecture section)
-        sleep ATLAS_OPCOM_cycleTime;
-    };
-};
-```
-
-### 6.4 Hybrid Pattern: Event-Triggered Scheduled Work
-
-The best of both worlds — events trigger scheduled computation only when needed:
+### 6.4 Hybrid: Event-Triggered Scheduled Work
 
 ```sqf
-// Unscheduled event handler triggers scheduled OPCOM re-evaluation
 ["ATLAS_objective_captured", {
     params ["_objectiveId", "_newOwner"];
-
-    // Light unscheduled work: update registry
+    // Light unscheduled: update registry
     private _obj = ATLAS_objectiveRegistry get _objectiveId;
     _obj set ["owner", _newOwner];
     _obj set ["capturedAt", serverTime];
-
-    // Heavy work: spawn OPCOM re-evaluation (scheduled)
+    // Heavy scheduled: OPCOM re-evaluation
     [_objectiveId, _newOwner] spawn ATLAS_fnc_OPCOM_reactToCapture;
-
 }] call CBA_fnc_addEventHandler;
 ```
 
@@ -487,687 +451,698 @@ The best of both worlds — events trigger scheduled computation only when neede
 
 ## 7. Event-Driven Architecture
 
-### 7.1 Event Bus Design
-
-ATLAS.OS uses CBA's custom event system as a publish/subscribe event bus:
+### 7.1 Spawn/Despawn: Polling vs Event-Driven
 
 ```sqf
-// Event taxonomy — namespaced, hierarchical
-// Format: "ATLAS_<domain>_<action>"
-
-// Profile events
-"ATLAS_profile_created"        // New profile registered
-"ATLAS_profile_destroyed"      // Profile removed (unit killed)
-"ATLAS_profile_spawned"        // Virtual profile materialized as real units
-"ATLAS_profile_despawned"      // Real units virtualized back to data
-"ATLAS_profile_moved"          // Profile position changed (virtual movement)
-
-// Objective events
-"ATLAS_objective_captured"     // Objective ownership changed
-"ATLAS_objective_contested"    // Multiple sides present at objective
-"ATLAS_objective_reinforced"   // New forces arrived at objective
-
-// OPCOM events
-"ATLAS_opcom_orderIssued"      // OPCOM assigned new order to profile
-"ATLAS_opcom_priorityChanged"  // Objective priority recalculated
-"ATLAS_opcom_phaseChanged"     // OPCOM operational phase transition
-
-// Logistics events
-"ATLAS_logistics_requestCreated"   // Resupply/reinforcement requested
-"ATLAS_logistics_convoyDispatched" // Logistics convoy en route
-"ATLAS_logistics_delivered"        // Supplies/reinforcements arrived
-
-// Player events
-"ATLAS_player_connected"       // Player joined
-"ATLAS_player_areaChanged"     // Player moved to new grid area
-"ATLAS_player_taskAssigned"    // Task given to player
-
-// Persistence events
-"ATLAS_persistence_saveStart"  // Save cycle beginning
-"ATLAS_persistence_saveComplete" // Save cycle finished
-"ATLAS_persistence_loaded"     // Data loaded from storage
-```
-
-### 7.2 ALiVE Polling vs ATLAS.OS Events — Side by Side
-
-**Spawn/Despawn System:**
-
-```sqf
-// ═══════ ALiVE APPROACH (POLLING) ═══════
-// Runs every 10-30 seconds, checks ALL profiles against ALL players
+// ═══ ALiVE: Polls ALL profiles every 15s ═══
 [] spawn {
     while {true} do {
-        {
-            private _profile = _x;
-            private _pos = [_profile, "position"] call ALIVE_fnc_hashGet;
-            private _shouldSpawn = false;
-            {
-                if ((_pos distance (getPos _x)) < 1500) exitWith {
-                    _shouldSpawn = true;
-                };
-            } forEach allPlayers;
-
-            if (_shouldSpawn && {!([_profile, "spawned"] call ALIVE_fnc_hashGet)}) then {
-                [_profile] call ALIVE_fnc_spawnProfile;
-            };
-            if (!_shouldSpawn && {[_profile, "spawned"] call ALIVE_fnc_hashGet}) then {
-                [_profile] call ALIVE_fnc_despawnProfile;
-            };
-        } forEach ALIVE_allProfiles;
-
+        { /* check every profile vs every player */ } forEach ALIVE_allProfiles;
         sleep 15;
     };
 };
 
-// ═══════ ATLAS.OS APPROACH (EVENT-DRIVEN + SPATIAL INDEX) ═══════
-// Player movement triggers grid-cell-change event
-// Only profiles in affected cells are evaluated
-
-// 1. Detect player grid cell changes (lightweight PFH)
+// ═══ ATLAS.OS: Event-driven, only on player grid-cell change ═══
+// 1. Detect cell changes (1Hz PFH)
 [{
     {
         private _player = _x;
         private _pos = getPosATL _player;
         private _cell = [floor ((_pos#0) / ATLAS_GRID_SIZE), floor ((_pos#1) / ATLAS_GRID_SIZE)];
         private _lastCell = _player getVariable ["ATLAS_lastCell", [-1,-1]];
-
         if (!(_cell isEqualTo _lastCell)) then {
             _player setVariable ["ATLAS_lastCell", _cell];
-            ["ATLAS_player_areaChanged", [_player, _cell, _lastCell]] call CBA_fnc_localEvent;
+            ["ATLAS_player_cellChanged", [_player, _cell, _lastCell]] call CBA_fnc_localEvent;
         };
     } forEach allPlayers;
-}, 1] call CBA_fnc_addPerFrameHandler;  // Check once per second, not per frame
+}, 1] call CBA_fnc_addPerFrameHandler;
 
-// 2. React to player area change — only check nearby cells
-["ATLAS_player_areaChanged", {
+// 2. React: only check nearby cells
+["ATLAS_player_cellChanged", {
     params ["_player", "_newCell", "_oldCell"];
-
-    // Get profiles in spawn radius cells around new position
-    private _nearbyIDs = [getPosATL _player, 1500] call ATLAS_fnc_gridQuery;
-
-    // Spawn profiles in range that aren't spawned
-    {
-        private _profile = ATLAS_profileRegistry get _x;
-        if (_profile get "state" == "virtual") then {
-            if ((getPosATL _player) distance (_profile get "pos") < 1500) then {
-                [_profile] call ATLAS_fnc_spawnProfile;
-            };
-        };
-    } forEach _nearbyIDs;
-
-    // Despawn profiles in OLD cells that are now out of range of ALL players
-    private _oldNearbyIDs = [_oldCell vectorMultiply ATLAS_GRID_SIZE, 1500] call ATLAS_fnc_gridQuery;
-    {
-        private _profile = ATLAS_profileRegistry get _x;
-        if (_profile get "state" == "spawned") then {
-            private _inRange = false;
-            {
-                if ((getPosATL _x) distance (_profile get "pos") < 1800) exitWith {
-                    _inRange = true;
-                };
-            } forEach allPlayers;
-            if (!_inRange) then {
-                [_profile] call ATLAS_fnc_despawnProfile;
-            };
-        };
-    } forEach _oldNearbyIDs;
-
+    private _nearbyIDs = [getPosATL _player, ATLAS_SPAWN_RADIUS] call ATLAS_fnc_gridQuery;
+    { /* spawn/despawn only candidates */ } forEach _nearbyIDs;
 }] call CBA_fnc_addEventHandler;
 ```
 
-**Key differences:**
-- ALiVE: Checks ALL profiles every 15s (even if no player moved) — **O(profiles × players)**
-- ATLAS.OS: Only checks when a player crosses a grid boundary — **O(nearby profiles)**, and only when needed
-
-### 7.3 Hysteresis for Spawn/Despawn
-
-ALiVE uses a fixed radius causing thrashing at the boundary. ATLAS.OS uses hysteresis:
+### 7.2 Hysteresis
 
 ```sqf
-#define ATLAS_SPAWN_RADIUS   1500   // Spawn when closer than this
-#define ATLAS_DESPAWN_RADIUS 1800   // Despawn when further than this (300m buffer)
-```
-
-A profile that spawns at 1500m won't despawn until the player is 1800m away, preventing rapid spawn/despawn cycling when players move near the boundary.
-
-### 7.4 Event-Driven OPCOM Reactions
-
-Instead of polling objective states on a timer, OPCOM subscribes to events:
-
-```sqf
-// OPCOM reacts to battlefield events immediately
-["ATLAS_objective_captured", {
-    params ["_objId", "_capturingSide"];
-    [_objId, _capturingSide] call ATLAS_fnc_OPCOM_handleCapture;
-}] call CBA_fnc_addEventHandler;
-
-["ATLAS_profile_destroyed", {
-    params ["_profileId", "_killerSide"];
-    // Update force strength estimates immediately
-    [_profileId] call ATLAS_fnc_OPCOM_updateForceEstimate;
-}] call CBA_fnc_addEventHandler;
-
-["ATLAS_logistics_delivered", {
-    params ["_destination", "_contents"];
-    // Re-evaluate offensive capability at destination
-    [_destination] call ATLAS_fnc_OPCOM_reassessObjective;
-}] call CBA_fnc_addEventHandler;
+#define ATLAS_SPAWN_RADIUS   1500
+#define ATLAS_DESPAWN_RADIUS 1800   // 300m buffer prevents thrashing
 ```
 
 ---
 
-## 8. Module Designs
+## 8. Hosting Models & Headless Client Distribution
 
-### 8.1 Profile System (replaces sys_profile + sys_profileHandler)
+### 8.1 Supported Hosting Models
 
-```
-┌─────────────────────────────────────────────────┐
-│              ATLAS Profile System                │
-│                                                  │
-│  ┌──────────────┐    ┌───────────────────────┐  │
-│  │   Registry    │    │   Spatial Index        │  │
-│  │  (HashMap)    │◄──►│  (Grid HashMap)        │  │
-│  └──────┬───────┘    └───────────────────────┘  │
-│         │                                        │
-│  ┌──────▼───────┐    ┌───────────────────────┐  │
-│  │  Spawner      │    │   Virtual Mover        │  │
-│  │  (Unscheduled)│    │  (Scheduled, chunked)  │  │
-│  └──────────────┘    └───────────────────────┘  │
-│                                                  │
-│  Events Published:                               │
-│   • ATLAS_profile_created                        │
-│   • ATLAS_profile_spawned/despawned              │
-│   • ATLAS_profile_destroyed                      │
-│   • ATLAS_profile_moved                          │
-└─────────────────────────────────────────────────┘
-```
+| Model | `isServer` | `isDedicated` | `hasInterface` | HC? |
+|---|---|---|---|---|
+| **Single Player** | true | false | true | No |
+| **Listen Server** | true | false | true | Rare |
+| **Dedicated Server** | true | true | false | Yes |
+| **Dedicated + HC** | true (srv) | true | false (both) | Yes |
 
-**Virtual movement** (moving data-only profiles along paths) is the one scheduled task here — it processes hundreds of profiles along waypoints and needs to yield.
+### 8.2 Locality Detection
 
-**Spawning/despawning** is unscheduled and event-driven — triggered by player proximity events.
-
-### 8.2 OPCOM — Operational Commander (replaces mil_OPCOM)
-
-```
-┌────────────────────────────────────────────────────────────┐
-│                    ATLAS OPCOM                              │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              CBA State Machine                       │   │
-│  │                                                      │   │
-│  │  ┌──────────┐    ┌───────────┐    ┌──────────────┐  │   │
-│  │  │ ASSESS   │───►│ PLAN      │───►│ EXECUTE      │  │   │
-│  │  │          │    │           │    │              │  │   │
-│  │  │ Evaluate │    │ Score     │    │ Issue orders │  │   │
-│  │  │ forces & │    │ objectives│    │ to profiles  │  │   │
-│  │  │ threats  │    │ & allocate│    │              │  │   │
-│  │  └──────────┘    └───────────┘    └──────┬───────┘  │   │
-│  │       ▲                                   │          │   │
-│  │       └───────────────────────────────────┘          │   │
-│  │                   (cycle)                            │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                             │
-│  Event Triggers (interrupt cycle for immediate reaction):   │
-│   • ATLAS_objective_captured → re-score, reallocate         │
-│   • ATLAS_profile_destroyed  → update force estimates       │
-│   • ATLAS_logistics_delivered → reassess capabilities       │
-│                                                             │
-│  Execution: ASSESS=scheduled, PLAN=scheduled,               │
-│             EXECUTE=unscheduled (issues events)              │
-└────────────────────────────────────────────────────────────┘
+```sqf
+// atlas_core XEH_preInit.sqf
+ATLAS_isServer       = isServer;
+ATLAS_isDedicated    = isDedicated;
+ATLAS_hasInterface   = hasInterface;
+ATLAS_isHC           = !hasInterface && !isServer;
+ATLAS_isSP           = !isMultiplayer;
+ATLAS_isServerOrSP   = ATLAS_isServer || ATLAS_isSP;
+ATLAS_hcAvailable    = false;
+ATLAS_hcClients      = createHashMap;  // clientOwnerStr -> load HashMap
 ```
 
-**OPCOM improvement over ALiVE:**
+### 8.3 Execution Locality Rules
 
-| Aspect | ALiVE OPCOM | ATLAS.OS OPCOM |
+| System | Where It Runs | Why |
 |---|---|---|
-| **Decision model** | Monolithic loop, all-at-once | CBA State Machine, phased |
-| **Data access** | Custom hash, O(n) per lookup | Native HashMap, O(1) |
-| **Reactivity** | Polls every 30-120s | Event-driven interrupt + scheduled planning |
-| **Objective scoring** | Recalculates everything each cycle | Incremental: only dirty objectives re-scored |
-| **Force allocation** | Simple nearest-available | Weighted scoring with transport cost estimate |
-| **Order dispatch** | Modifies profiles directly | Publishes `ATLAS_opcom_orderIssued` event |
+| Registries, spatial grid | Server | Authoritative data |
+| OPCOM, LOGCOM, placement | Server | Strategic AI |
+| Spawn/despawn decisions | Server | Server decides |
+| Spawned AI simulation | Server OR HC | Load balanced |
+| CQB garrison spawn | Server | Groups may transfer to HC |
+| C2 tablet UI | Client (`hasInterface`) | Player UI |
+| Persistence | Server | Server owns data |
+| Extension (PostgreSQL) | Server | DLL on server |
+| GC (deleteVehicle) | Server | Server-authoritative |
 
-**Dirty-flag optimization:**
+### 8.4 Headless Client AI Distribution
 
-```sqf
-// Only re-score objectives that changed since last cycle
-["ATLAS_objective_contested", {
-    params ["_objId"];
-    private _obj = ATLAS_objectiveRegistry get _objId;
-    _obj set ["_dirty", true];  // Mark for re-scoring
-}] call CBA_fnc_addEventHandler;
-
-// In OPCOM PLAN phase (scheduled):
-{
-    private _obj = _y;
-    if (_obj getOrDefault ["_dirty", true]) then {
-        [_obj] call ATLAS_fnc_OPCOM_scoreObjective;
-        _obj set ["_dirty", false];
-    };
-} forEach ATLAS_objectiveRegistry;
-```
-
-### 8.3 LOGCOM — Logistics Commander (replaces mil_logistics)
+#### HC Registration
 
 ```sqf
-// Event-driven logistics pipeline
-// 1. Demand event fires when objective needs supplies
-["ATLAS_opcom_orderIssued", {
-    params ["_orderId", "_order"];
-    if (_order get "type" == "ATTACK" || _order get "type" == "DEFEND") then {
-        // Check if forces at destination need resupply
-        private _forces = [_order get "destination"] call ATLAS_fnc_getProfilesAtObjective;
-        private _ammoLevel = [_forces] call ATLAS_fnc_assessAmmoLevel;
-        if (_ammoLevel < 0.5) then {
-            ["ATLAS_logistics_requestCreated", [
-                createHashMapFromArray [
-                    ["type", "RESUPPLY"],
-                    ["destination", _order get "destination"],
-                    ["priority", _order get "priority"],
-                    ["requestedAt", serverTime]
-                ]
-            ]] call CBA_fnc_localEvent;
-        };
-    };
-}] call CBA_fnc_addEventHandler;
+// HC side: announce to server
+if (ATLAS_isHC) then {
+    ["ATLAS_hc_register", [clientOwner]] call CBA_fnc_serverEvent;
+};
 
-// 2. LOGCOM picks up requests and dispatches convoys
-["ATLAS_logistics_requestCreated", {
-    params ["_request"];
-    [_request] call ATLAS_fnc_LOGCOM_processRequest;
+// Server side: register HC
+["ATLAS_hc_register", {
+    params ["_hcClientOwner"];
+    ATLAS_hcAvailable = true;
+    ATLAS_hcClients set [str _hcClientOwner, createHashMapFromArray [
+        ["clientOwner", _hcClientOwner],
+        ["groupCount", 0],
+        ["unitCount", 0],
+        ["lastUpdate", serverTime]
+    ]];
+    diag_log format ["[ATLAS][HC] Headless client registered: %1 (total: %2)",
+        _hcClientOwner, count ATLAS_hcClients];
 }] call CBA_fnc_addEventHandler;
 ```
 
-### 8.4 CQB — Close Quarters Battle (replaces mil_CQB)
-
-CQB is fundamentally reactive — spawn garrisons when players enter buildings. This is a pure unscheduled, event-driven system:
+#### Group Transfer to Least-Loaded HC
 
 ```sqf
-// Pre-compute building positions at mission start (scheduled, one-time)
-// Store in spatial grid for O(1) lookup
+ATLAS_fnc_hc_transferGroup = {
+    params ["_group", "_profileId"];
+    if (!ATLAS_hcAvailable || count ATLAS_hcClients == 0) exitWith {};
 
-// Runtime: player proximity triggers garrison spawn (unscheduled)
-["ATLAS_player_areaChanged", {
-    params ["_player", "_newCell"];
-
-    // Get CQB-eligible buildings in nearby cells
-    private _buildings = [_newCell, ATLAS_CQB_RADIUS] call ATLAS_fnc_CQB_getBuildingsInRange;
-
+    // Find least-loaded HC
+    private _bestHC = -1;
+    private _bestLoad = 1e10;
     {
-        private _building = _x;
-        if !(_building getVariable ["ATLAS_CQB_garrisoned", false]) then {
-            [_building] call ATLAS_fnc_CQB_spawnGarrison;
-            _building setVariable ["ATLAS_CQB_garrisoned", true];
+        private _load = _y get "unitCount";
+        if (_load < _bestLoad) then {
+            _bestLoad = _load;
+            _bestHC = _y get "clientOwner";
         };
-    } forEach _buildings;
-}] call CBA_fnc_addEventHandler;
+    } forEach ATLAS_hcClients;
+
+    if (_bestHC < 0) exitWith {};
+
+    // Transfer
+    _group setGroupOwner _bestHC;
+
+    // Update tracking
+    private _hcData = ATLAS_hcClients get (str _bestHC);
+    _hcData set ["groupCount", (_hcData get "groupCount") + 1];
+    _hcData set ["unitCount", (_hcData get "unitCount") + count units _group];
+
+    // Track in profile
+    private _profile = ATLAS_profileRegistry get _profileId;
+    _profile set ["_hcOwner", _bestHC];
+
+    ["atlas_hc_groupTransferred", [_profileId, _bestHC, _group]] call CBA_fnc_localEvent;
+};
 ```
 
-### 8.5 Civilian Population (replaces civ_population)
-
-**ALiVE problem:** Spawns individual civilian agents with full AI, creating massive overhead.
-
-**ATLAS.OS approach:** Ambient civilians use a lightweight pool system:
+#### Transfer Eligibility
 
 ```sqf
-// Civilian Pool — reuse agents instead of create/destroy
-ATLAS_civPool = [];  // Pool of inactive civilian agents
+ATLAS_fnc_hc_shouldTransfer = {
+    params ["_group", "_profile"];
+    if (count ATLAS_hcClients == 0) exitWith { false };
+    if (isPlayer leader _group) exitWith { false };      // Player-led stays
+    if (_profile get "type" == "static") exitWith { false }; // Static weapons stay
+    if (count units _group == 0) exitWith { false };
 
-ATLAS_fnc_CIV_getAgent = {
-    if (ATLAS_civPool isEqualTo []) then {
-        // Create new agent only if pool is empty
-        private _agent = createAgent [selectRandom ATLAS_civClassnames, [0,0,0], [], 0, "NONE"];
-        _agent
-    } else {
-        ATLAS_civPool deleteAt 0
-    };
-};
+    // Don't transfer mid-combat near players
+    private _nearPlayer = false;
+    {
+        if (leader _group distance _x < 300) exitWith { _nearPlayer = true };
+    } forEach allPlayers;
+    if (_nearPlayer && behaviour leader _group == "COMBAT") exitWith { false };
 
-ATLAS_fnc_CIV_returnAgent = {
-    params ["_agent"];
-    _agent enableSimulationGlobal false;
-    _agent setPos [0,0,0];
-    ATLAS_civPool pushBack _agent;
+    true
 };
 ```
 
-**Agent pooling eliminates the overhead of constant createAgent/deleteVehicle cycles.** The pool pre-allocates civilians and moves them into position when needed, then returns them when out of range.
-
-### 8.6 Persistence System (replaces sys_data)
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                  ATLAS Persistence                            │
-│                                                               │
-│  ┌──────────┐    ┌─────────────┐    ┌──────────────────────┐ │
-│  │ Serializer│───►│ Storage     │───►│ Backend              │ │
-│  │           │    │ Abstraction │    │  • profileNamespace   │ │
-│  │ HashMap → │    │ Layer       │    │  • Extension (DB)     │ │
-│  │ Array     │    │             │    │  • File (JSON export) │ │
-│  └──────────┘    └─────────────┘    └──────────────────────┘ │
-│                                                               │
-│  Trigger: Event-driven + periodic backup                      │
-│  • ATLAS_persistence_save (manual/admin)                      │
-│  • Periodic auto-save via CBA timer (configurable)            │
-│  • Mission end hook                                           │
-│                                                               │
-│  Optimization: Incremental save — only modified profiles      │
-│  Each profile tracks _dirty flag; only dirty profiles saved   │
-└──────────────────────────────────────────────────────────────┘
-```
-
-**Incremental persistence** is a major improvement. ALiVE serializes the entire world state every save cycle. ATLAS.OS tracks dirty flags on each entity and only serializes what changed:
+#### Rebalancing (Every 30s)
 
 ```sqf
-// Mark profile dirty on any modification
-ATLAS_fnc_profileSet = {
-    params ["_profile", "_key", "_value"];
-    _profile set [_key, _value];
-    _profile set ["_dirty", true];
-};
+ATLAS_fnc_hc_rebalance = {
+    if (count ATLAS_hcClients < 2) exitWith {};
 
-// Save only dirty profiles (scheduled — can be large)
-ATLAS_fnc_persistence_save = {
-    private _dirtyCount = 0;
+    private _loads = [];
+    { _loads pushBack [_y get "unitCount", _y get "clientOwner"] } forEach ATLAS_hcClients;
+    _loads sort true;
+
+    private _minLoad = (_loads#0)#0;
+    private _maxLoad = (_loads#(count _loads - 1))#0;
+
+    if (_maxLoad < _minLoad * 2) exitWith {}; // Balanced enough
+
+    private _maxHC = (_loads#(count _loads - 1))#1;
+    private _minHC = (_loads#0)#1;
+    private _target = floor ((_maxLoad - _minLoad) / 2);
+    private _transferred = 0;
+
     {
         private _profile = _y;
-        if (_profile getOrDefault ["_dirty", false]) then {
-            private _serialized = [_profile] call ATLAS_fnc_serialize;
-            [_x, _serialized] call ATLAS_fnc_storage_write;
-            _profile set ["_dirty", false];
-            _dirtyCount = _dirtyCount + 1;
-
-            if (_dirtyCount % 50 == 0) then { sleep 0.01; }; // Yield
+        if (_profile get "_hcOwner" == _maxHC && _profile get "state" == "spawned") then {
+            private _group = _profile get "group";
+            if (!isNull _group) then {
+                _group setGroupOwner _minHC;
+                _profile set ["_hcOwner", _minHC];
+                _transferred = _transferred + count units _group;
+            };
         };
+        if (_transferred >= _target) exitWith {};
     } forEach ATLAS_profileRegistry;
-
-    ["ATLAS_persistence_saveComplete", [_dirtyCount]] call CBA_fnc_localEvent;
 };
 ```
 
-### 8.7 Garbage Collection (replaces sys_GC)
+#### HC Disconnect Handling
 
-ALiVE GC runs as a scheduled loop processing all dead entities. ATLAS.OS uses event-driven + per-frame budget:
+When an HC disconnects, Arma automatically reverts group ownership to the server. ATLAS updates tracking and redistributes to remaining HCs if available.
 
-```sqf
-// Dead units queue via event
-ATLAS_GC_queue = [];
-
-// Entity killed → add to GC queue (unscheduled, immediate)
-["ATLAS_profile_destroyed", {
-    params ["_profileId"];
-    private _profile = ATLAS_profileRegistry get _profileId;
-    if (!isNil "_profile" && {_profile get "state" == "spawned"}) then {
-        ATLAS_GC_queue pushBack [serverTime, _profile get "spawnedUnits"];
-    };
-}] call CBA_fnc_addEventHandler;
-
-// Per-frame handler: clean up old corpses within frame budget
-[{
-    if (ATLAS_GC_queue isEqualTo []) exitWith {};
-
-    private _now = serverTime;
-    private _processed = 0;
-
-    while {!( ATLAS_GC_queue isEqualTo []) && _processed < 3} do {
-        private _entry = ATLAS_GC_queue#0;
-        _entry params ["_deathTime", "_units"];
-
-        if (_now - _deathTime > ATLAS_GC_DELAY) then {
-            ATLAS_GC_queue deleteAt 0;
-            { deleteVehicle _x } forEach _units;
-            _processed = _processed + 1;
-        } else {
-            break; // Queue is time-ordered; if first isn't ready, none are
-        };
-    };
-}, 0] call CBA_fnc_addPerFrameHandler;
-```
-
-### 8.8 C2ISTAR — Command & Control Interface
-
-Event-driven UI updates instead of polling:
+### 8.5 Network Synchronization
 
 ```sqf
-// Subscribe to events that affect the map display
-{
-    [_x, {
-        if (ATLAS_C2_isOpen) then {
-            call ATLAS_fnc_C2_refreshMap;
-        };
-    }] call CBA_fnc_addEventHandler;
-} forEach [
-    "ATLAS_objective_captured",
-    "ATLAS_profile_spawned",
-    "ATLAS_profile_destroyed",
-    "ATLAS_opcom_orderIssued"
-];
-```
-
----
-
-## 9. Performance Improvement Projections
-
-### 9.1 Per-System Algorithmic Improvements
-
-These improvements are based on the *algorithmic complexity* changes between ALiVE's architecture and ATLAS.OS's design. They do not represent measured benchmarks — actual performance gains will depend on mission scale, hardware, and workload. These must be validated with real profiling once the systems are implemented (see §9.2).
-
-| System | ALiVE Approach | ATLAS.OS Approach | Complexity Reduction |
-|---|---|---|---|
-| **Data Access** | Custom parallel-array hash with `find` (linear scan) | Native HashMap (engine-level hash table) | **O(n) → O(1)** per lookup |
-| **Profile Proximity** | Iterate all profiles × all players every cycle | Spatial grid: each player queries only nearby cells | **O(n×m) → O(m×k)** where k = profiles in nearby cells |
-| **OPCOM Decision Cycle** | Full recalculation of all objectives every 30-120s | Dirty-flag: only re-evaluate objectives whose inputs changed | **O(n) → O(dirty)** per cycle |
-| **Spawn/Despawn** | Poll all profiles on timer, binary threshold | Event-driven on player grid-cell changes, hysteresis buffer | **Polling → event-driven**, eliminates threshold thrashing |
-| **Civilian System** | Create/destroy agents per activation | Object pooling + reuse | **Fewer createVehicle/deleteVehicle calls** |
-| **Persistence** | Serialize entire world state | Incremental: only save profiles whose data changed | **O(n) → O(dirty)** per save |
-| **Garbage Collection** | Scheduled loop iterates all dead entities | Event-driven queue, per-frame budget cap | **Bounded per-frame cost** instead of variable-length loop |
-| **CQB Garrison** | Poll buildings near all players each cycle | Trigger on player grid-cell change events | **Only fires when players move between cells** |
-
-### 9.2 Projected Scaling (Requires Benchmarking)
-
-The table below illustrates *how* the algorithmic changes reduce work, using a hypothetical 300-profile / 20-player / 50-objective mission. **The operation counts are derived from algorithm complexity, not from measured timings.** ALiVE does not publish per-operation benchmarks, so we cannot assign millisecond costs to its systems.
-
-| Metric | ALiVE (operations per cycle) | ATLAS.OS (operations per cycle) | Why fewer |
-|---|---|---|---|
-| **Proximity distance checks** | 300 × 20 = **6,000** | 20 players × ~3 nearby = **~60** | Spatial grid eliminates distant profiles from consideration |
-| **OPCOM objective evaluations** | All 50 objectives | Only objectives flagged dirty (varies) | Dirty-flag skip; typical steady-state: ~10-20% of objectives |
-| **Persistence data volume** | All 300 profiles serialized | Only changed profiles serialized | Dirty-tracking; typical: ~5-15% of profiles per save |
-
-**What this means in practice:** The improvements are in *how much unnecessary work is skipped*, not in making individual operations faster (a `distance` call costs the same either way). The real-world FPS impact depends on baseline server load, mission complexity, and mod interactions.
-
-**Benchmarking plan:** Once core systems are implemented, we will profile using `diag_tickTime` measurements under controlled conditions (fixed player count, fixed profile count, standardized hardware) and publish actual numbers. Until then, these projections should be treated as architectural rationale, not performance guarantees.
-
-### 9.3 Memory Improvements
-
-| Aspect | ALiVE | ATLAS.OS |
-|---|---|---|
-| **Per-profile overhead** | Nested arrays with duplicate key strings | Single HashMap, no string duplication |
-| **Global namespace** | 200+ ALIVE_* variables | Minimal ATLAS_* globals, data in registries |
-| **Civilian agents** | Created/destroyed, no pooling | Pooled and reused |
-
----
-
-## 10. Module Feature Parity Matrix
-
-| ALiVE Feature | ALiVE Module | ATLAS.OS Module | Status | Notes |
-|---|---|---|---|---|
-| Virtual unit profiles | sys_profile | atlas_profile | Redesigned | Native HashMap, spatial index |
-| Profile handler (CRUD) | sys_profileHandler | atlas_profile | Merged | Single module, cleaner API |
-| AI Commander (OPCOM) | mil_OPCOM | atlas_opcom | Redesigned | CBA state machine, event-driven |
-| Logistics Commander | mil_logistics | atlas_logcom | Redesigned | Event-driven pipeline |
-| Air Tasking Order | mil_ato | atlas_ato | Redesigned | Event-driven, state machine |
-| Close Quarters Battle | mil_CQB | atlas_cqb | Redesigned | Event-driven spawning |
-| Military Placement | mil_placement | atlas_placement | Redesigned | HashMap config, parallel init |
-| Civilian Population | civ_population | atlas_civilian | Redesigned | Agent pooling, ambient system |
-| Civilian Placement | civ_placement | atlas_civilian | Merged | Combined with population |
-| Player Persistence | sys_data + backends | atlas_persistence | Redesigned | Incremental dirty-save |
-| ORBAT Creator | sys_orbatcreator | atlas_orbat | Redesigned | HashMap-based ORBAT trees |
-| C2ISTAR Tablet | C2ISTAR | atlas_c2 | Redesigned | Event-driven UI updates |
-| Combat Support | sup_combatsupport | atlas_support | Redesigned | Event-driven request system |
-| Multispawn | sup_multispawn | atlas_insertion | Redesigned | Simplified, HashMap config |
-| Player Resupply | sup_player_resupply | atlas_support | Merged | Combined with combat support |
-| Garbage Collection | sys_GC | atlas_gc | Redesigned | Event queue + PFH budget |
-| AI Skill Management | sys_AI | atlas_ai | Redesigned | CBA settings integration |
-| Weather Persistence | sys_weather | atlas_weather | Redesigned | Event-driven sync |
-| Task Framework | sys_tasks | atlas_tasks | Redesigned | Event-driven task lifecycle |
-| Statistics | sys_statistics | atlas_stats | Redesigned | Event-driven stat collection |
-| Admin Actions | sys_adminactions | atlas_admin | Redesigned | CBA settings + ACE interact |
-| Map Markers | sys_marker | atlas_markers | Redesigned | Event-driven marker updates |
-| SPOTREP/SITREP/PATROLREP | sys_spotrep etc. | atlas_reports | Merged | Single reporting framework |
-| Object Logistics | sys_logistics | atlas_cargo | Redesigned | Event-driven cargo system |
-
-**Full feature parity: 24/24 ALiVE features covered.**
-
----
-
-## 11. Technical Specifications
-
-### 11.1 Dependencies
-
-| Dependency | Version | Purpose |
-|---|---|---|
-| **Arma 3** | 2.16+ | Native HashMap support (2.02+), latest engine features |
-| **CBA_A3** | 3.16+ | Event system, PFH, state machines, settings, keybinds |
-| **ACE3** | Optional | Enhanced interaction, medical integration |
-
-### 11.2 PBO Addon Structure
-
-```
-@ATLAS_OS/
-├── addons/
-│   ├── atlas_main/           # Core framework, event bus, data layer
-│   │   ├── config.cpp
-│   │   ├── CfgEventHandlers.hpp
-│   │   ├── XEH_preInit.sqf
-│   │   ├── XEH_postInit.sqf
-│   │   └── fnc/
-│   │       ├── fn_init.sqf
-│   │       ├── fn_hashToArray.sqf
-│   │       ├── fn_arrayToHash.sqf
-│   │       ├── fn_gridInsert.sqf
-│   │       ├── fn_gridRemove.sqf
-│   │       ├── fn_gridQuery.sqf
-│   │       ├── fn_gridMove.sqf
-│   │       └── fn_log.sqf
-│   ├── atlas_profile/        # Virtual profile system
-│   ├── atlas_opcom/          # AI operational commander
-│   ├── atlas_logcom/         # Logistics commander
-│   ├── atlas_ato/            # Air tasking order
-│   ├── atlas_cqb/            # Close quarters battle
-│   ├── atlas_placement/      # Military force placement
-│   ├── atlas_civilian/       # Civilian population system
-│   ├── atlas_persistence/    # Save/load framework
-│   ├── atlas_orbat/          # ORBAT creator/editor
-│   ├── atlas_c2/             # C2ISTAR command interface
-│   ├── atlas_support/        # Combat support (CAS/transport/arty)
-│   ├── atlas_insertion/      # Multi-spawn/insertion system
-│   ├── atlas_gc/             # Garbage collection
-│   ├── atlas_ai/             # AI skill/behavior management
-│   ├── atlas_weather/        # Weather persistence
-│   ├── atlas_tasks/          # Task framework
-│   ├── atlas_stats/          # Player statistics
-│   ├── atlas_admin/          # Admin tools
-│   ├── atlas_markers/        # Map marker management
-│   ├── atlas_reports/        # SPOTREP/SITREP/PATROLREP
-│   ├── atlas_cargo/          # Object logistics (cargo/sling)
-│   └── atlas_compat/         # Compatibility layer (ALiVE mission migration)
-├── optionals/
-│   └── atlas_ace_compat/     # ACE3 integration
-├── mod.cpp
-├── meta.cpp
-└── README.md
-```
-
-### 11.3 CfgFunctions Pattern
-
-Each module follows a consistent function registration pattern:
-
-```cpp
-class CfgFunctions {
-    class ATLAS {
-        class profile {
-            file = "atlas_profile\fnc";
-            class init {};
-            class create {};
-            class destroy {};
-            class spawn {};
-            class despawn {};
-            class moveTo {};
-            class getByID {};
-            class getInArea {};
-            class serialize {};
-            class deserialize {};
-        };
-    };
-};
-```
-
-### 11.4 XEH (Extended Event Handler) Lifecycle
-
-```sqf
-// XEH_preInit.sqf — runs before mission, unscheduled
-// Initialize registries, spatial grid, module config
-ATLAS_profileRegistry = createHashMap;
-ATLAS_spatialGrid = createHashMap;
-ATLAS_objectiveRegistry = createHashMap;
-// ... register CBA event handlers ...
-
-// XEH_postInit.sqf — runs after mission init, unscheduled
-// Start per-frame handlers, begin module initialization
-if (isServer) then {
-    call ATLAS_fnc_profile_init;
-    call ATLAS_fnc_OPCOM_init;
-    call ATLAS_fnc_LOGCOM_init;
-    // ...
-};
-```
-
-### 11.5 Network Synchronization Strategy
-
-```sqf
-// JIP (Join In Progress) compatible via HashMap serialization
-// Server → Client sync uses CBA events over network
-
-// Server: broadcast critical state changes
-["ATLAS_objective_captured", {
-    params ["_objId", "_side"];
-    // Sync to all clients including JIP queue
-    ["ATLAS_sync_objectiveUpdate", [_objId, _side]] call CBA_fnc_globalEvent;
-}] call CBA_fnc_addEventHandler;
-
 // JIP: new player gets full state dump
 ["ATLAS_player_connected", {
     params ["_player"];
-    // Send current objective states
     private _objectiveStates = [];
     {
         _objectiveStates pushBack [_x, _y get "owner", _y get "state"];
     } forEach ATLAS_objectiveRegistry;
-
     ["ATLAS_sync_fullState", [_objectiveStates], _player] call CBA_fnc_targetEvent;
 }] call CBA_fnc_addEventHandler;
 ```
 
 ---
 
-## Summary: Why Rebuild From Scratch?
+## 9. Module Architecture — 16 PBOs
 
-| Dimension | ALiVE.OS | ATLAS.OS | Why It Matters |
-|---|---|---|---|
-| **Data structures** | Custom parallel-array hashes | Native HashMaps | O(1) lookups vs linear scan, cleaner API |
-| **Spatial queries** | O(n×m) brute force | Grid-based spatial index | Dramatically fewer distance checks (see §5.3) |
-| **Execution model** | Mostly scheduled, polling | Mostly unscheduled, event-driven | Eliminates scheduler contention |
-| **Reactivity** | Poll every 10-120s | Instant event response | Sub-second reaction to battlefield changes |
-| **State management** | Monolithic save/load | Incremental dirty-flag persistence | Only changed profiles serialized per save |
-| **Code quality** | Index-based access, fragile | Named key access, self-documenting | Dramatically easier to maintain/extend |
-| **Spawn management** | Fixed radius, thrashing | Hysteresis + event-driven | Eliminates spawn/despawn cycling |
-| **AI Commander** | Monolithic recalculation loop | CBA state machine + incremental scoring | Only dirty objectives re-evaluated per cycle |
-| **Object lifecycle** | Create/destroy constantly | Object pooling (civilians) | Reduces GC pressure, smoother FPS |
-| **Modularity** | Tightly coupled via globals | Event bus decoupling | Modules are independently testable |
+| # | PBO | Replaces (ALiVE) | Purpose |
+|---|-----|-------------------|---------|
+| 1 | `atlas_core` | sys_data, fnc_analysis, fnc_strategic, sys_marker | Foundation: spatial grid, map analysis, registries, event bus, markers, HC manager |
+| 2 | `atlas_profile` | sys_profile, sys_profileHandler | Virtual unit lifecycle |
+| 3 | `atlas_opcom` | mil_opcom, mil_command | AI commander (OPCOM + TACOM as CBA state machine) |
+| 4 | `atlas_logistics` | mil_logistics, mil_convoy, sup_player_resupply | All logistics |
+| 5 | `atlas_air` | mil_ato, air parts of sup_combatsupport | Air tasking: CAS, CAP, SEAD, transport |
+| 6 | `atlas_cqb` | mil_CQB | Building garrisons |
+| 7 | `atlas_placement` | mil_placement | Initial force placement |
+| 8 | `atlas_civilian` | civ_population, civ_placement, amb_civ_* | Civilian simulation |
+| 9 | `atlas_asymmetric` | mil_ied, mil_intelligence, insurgency | IEDs, cells, intel |
+| 10 | `atlas_persist` | sys_data, sys_data_pns/couchdb, sys_player, sys_weather | Two-tier persistence |
+| 11 | `atlas_c2` | C2ISTAR, sys_tasks, spotrep/sitrep/patrolrep | Command interface, tasks, reports |
+| 12 | `atlas_support` | sup_combatsupport (arty), sup_multispawn, sup_group_manager | Artillery, insertion, squads |
+| 13 | `atlas_gc` | sys_GC | Garbage collection |
+| 14 | `atlas_ai` | sys_aiskill | AI skill management |
+| 15 | `atlas_stats` | sys_statistics | Statistics |
+| 16 | `atlas_admin` | sys_adminactions | Debug/admin |
 
-**Bottom line:** ATLAS.OS addresses the core architectural limitations of ALiVE — replacing linear scans with hash tables, brute-force proximity with spatial indexing, polling with events, and monolithic saves with incremental persistence. The expected result is significantly better scaling with large profile counts, though actual performance gains must be validated through benchmarking once the systems are implemented.
+### Consolidation Rationale
+
+- **OPCOM + TACOM**: TACOM is OPCOM's execute phase. One CBA state machine, no IPC.
+- **Logistics + Convoy + Player Resupply**: One pipeline for all supply chain operations.
+- **ATO + air combat support**: All air ops in one module.
+- **IED + Intel + Insurgency**: Tightly coupled domain.
+- **C2ISTAR + Tasks + 3 report modules**: The tablet is the UI for all of them.
+- **Core absorbs analysis + markers**: Foundational algorithms.
+- **4 civilian modules → 1**: Population, placement, behaviors, interactions = one domain.
 
 ---
 
-*This document is the foundation for ATLAS.OS development. Each module section will be expanded into detailed technical specifications as implementation begins.*
+## 10. Module Specifications
+
+### 10.1 `atlas_core`
+
+**Purpose**: Spatial grid, map analysis, registries, event bus, markers, HC manager, locality detection.
+
+**Events Published**: `core_ready`, `grid_cellUpdated`, `objective_registered`, `objective_stateChanged`, `player_cellChanged`, `player_connected/disconnected`, `marker_*`, `hc_registered/disconnected/groupTransferred`
+
+**Dependencies**: CBA_A3 only | **Init Phase**: 0
+
+**Data**: `ATLAS_spatialGrid`, `ATLAS_objectiveRegistry`, `ATLAS_sectorAnalysis`, `ATLAS_hcClients`
+
+---
+
+### 10.2 `atlas_profile`
+
+**Purpose**: Virtual unit profiles. HashMap entities that spawn/despawn based on player proximity. HC transfer on spawn.
+
+**Events Published**: `profile_created/destroyed/spawned/despawned/moved/damaged/orderReceived`
+
+**Subscriptions**: `core_ready`, `player_cellChanged`, `opcom_orderIssued`
+
+**Dependencies**: `atlas_core` | **Init Phase**: 1
+
+**Data**: `ATLAS_profileRegistry` — HashMap of profile HashMaps (see §5.1)
+
+---
+
+### 10.3 `atlas_opcom`
+
+**Purpose**: AI strategic + tactical commander. CBA state machine: ASSESS → PLAN → EXECUTE → MONITOR.
+
+**Events Published**: `opcom_orderIssued/priorityChanged/phaseChanged/forceAllocated/reinforcementRequested/retreatOrdered`
+
+**Subscriptions**: `core_ready`, `profile_created/destroyed/damaged`, `objective_stateChanged`, `logistics_delivered`, `asymmetric_cellDiscovered`, `persist_theaterStateReceived`
+
+**Dependencies**: `atlas_core`, `atlas_profile` | **Init Phase**: 2
+
+**Data**: `ATLAS_opcomRegistry` — opcom state + orders (see §10 in plan)
+
+---
+
+### 10.4 `atlas_logistics`
+
+**Purpose**: Supply chain. AI resupply, convoys, player requests.
+
+**Events Published**: `logistics_requestCreated/convoyDispatched/convoyArrived/delivered/convoyDestroyed/supplyLevelChanged`
+
+**Subscriptions**: `opcom_reinforcementRequested/orderIssued`, `profile_destroyed`, `objective_stateChanged`, `persist_theaterStateReceived`
+
+**Dependencies**: `atlas_core`, `atlas_profile` | **Init Phase**: 3
+
+---
+
+### 10.5 `atlas_air`
+
+**Purpose**: Air tasking — CAS, CAP, SEAD, transport.
+
+**Events Published**: `air_missionAssigned/missionComplete/aircraftLost/casOnStation/transportReady`
+
+**Dependencies**: `atlas_core`, `atlas_profile` | **Init Phase**: 3
+
+---
+
+### 10.6 `atlas_cqb`
+
+**Purpose**: Building garrisons. Event-driven, unscheduled.
+
+**Events Published**: `cqb_garrisoned`, `cqb_cleared`
+
+**Dependencies**: `atlas_core`, `atlas_profile` | **Init Phase**: 3
+
+---
+
+### 10.7 `atlas_placement`
+
+**Purpose**: Initial force placement. Runs once at mission start.
+
+**Events Published**: `placement_started`, `placement_complete`
+
+**Dependencies**: `atlas_core`, `atlas_profile` | **Init Phase**: 2
+
+---
+
+### 10.8 `atlas_civilian`
+
+**Purpose**: Ambient civilians. Agent pooling, CBA state machine behaviors, hostility, interactions.
+
+**Events Published**: `civ_hostilityChanged/agentFleeing/agentQuestioned/populationChanged`
+
+**Dependencies**: `atlas_core` | **Init Phase**: 3
+
+---
+
+### 10.9 `atlas_asymmetric`
+
+**Purpose**: IEDs, VBIEDs, insurgent cells, recruitment, intel.
+
+**Events Published**: `asymmetric_iedPlaced/iedDetonated/iedDisarmed/cellDiscovered/cellRecruited/intelGathered`
+
+**Dependencies**: `atlas_core`, `atlas_profile`, `atlas_civilian` | **Init Phase**: 4
+
+---
+
+### 10.10 `atlas_persist`
+
+**Purpose**: Two-tier persistence. PNS (local) + PostgreSQL (cross-server via DLL extension).
+
+**Events Published**: `persist_saveStarted/saveComplete/loadComplete/theaterStateReceived/playerLoaded/playerSaved`
+
+**Dependencies**: `atlas_core` | **Init Phase**: 1
+
+**See §11 for full cross-server architecture.**
+
+---
+
+### 10.11 `atlas_c2`
+
+**Purpose**: Tablet UI, task framework, SPOTREP/SITREP/PATROLREP.
+
+**Events Published**: `c2_taskCreated/taskCompleted/casRequested/transportRequested/resupplyRequested/reportSubmitted`
+
+**Runs on**: Client only (`hasInterface`) | **Init Phase**: 5
+
+---
+
+### 10.12 `atlas_support`
+
+**Purpose**: Artillery, insertion points, squad management.
+
+**Init Phase**: 4
+
+---
+
+### 10.13-10.16 Utility Modules
+
+- **`atlas_gc`**: Event queue + PFH budget, 3 corpses/frame max
+- **`atlas_ai`**: CBA Settings for AI skill, applies on `profile_spawned`
+- **`atlas_stats`**: Event-driven tallying, persists to PNS + PostgreSQL
+- **`atlas_admin`**: Debug menu, force save/load, teleport
+
+All init Phase 5.
+
+---
+
+## 11. Cross-Server Persistence Architecture
+
+### 11.1 Two-Tier Model
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │            PostgreSQL Database             │
+                    │    (Shared Theater State - Cross-Server)   │
+                    │                                            │
+                    │  theater_state   - war status per server   │
+                    │  faction_forces  - aggregate force levels   │
+                    │  reinforcements  - shared reserve pool      │
+                    │  cross_events    - inter-server event queue │
+                    │  player_state    - roaming player data      │
+                    │  objectives      - strategic objective state│
+                    │  server_registry - active server heartbeats │
+                    └──────┬────────────────────┬───────────────┘
+                           │                    │
+                  Extension DLL calls    Extension DLL calls
+                           │                    │
+                    ┌──────▼──────┐      ┌──────▼──────┐
+                    │  Server 1   │      │  Server 2   │
+                    │  (Altis)    │      │  (Stratis)  │
+                    │  PNS: local │      │  PNS: local │
+                    │  profiles,  │      │  profiles,  │
+                    │  convoys,   │      │  convoys,   │
+                    │  CQB, IEDs  │      │  CQB, IEDs  │
+                    └─────────────┘      └─────────────┘
+```
+
+### 11.2 Data Distribution
+
+| Data | PNS | PostgreSQL | Rationale |
+|------|:---:|:----------:|-----------|
+| Individual profiles | Yes | Aggregates | Map-specific |
+| Force strength | — | Yes | Theater tracking |
+| Objective state | Yes | Yes | Cross-server strategy |
+| Reinforcement pool | — | Yes | Shared across servers |
+| Convoys | Yes | — | Map-specific |
+| Player state | Backup | Yes | Players switch servers |
+| CQB garrisons | Yes | — | Map-specific |
+| IEDs | Yes | Density only | Map-specific |
+| Civilian hostility | Yes | Yes | Cross-server sentiment |
+| Weather | Yes | — | Per-map |
+| Statistics | Backup | Yes | Persistent |
+
+### 11.3 Extension (DLL) Interface
+
+**Extension**: `atlas_db` (C++ or Rust)
+
+| Function | Purpose | Async? |
+|----------|---------|--------|
+| `INIT` | Connection pool setup | No |
+| `HEARTBEAT` | Server registration | No |
+| `THEATER_READ` | Read theater state | No |
+| `THEATER_WRITE` | Write local theater data | Yes |
+| `OBJECTIVES_SYNC` | Read/write objectives | No |
+| `FORCES_WRITE` | Write force aggregates | Yes |
+| `REINFORCEMENTS_READ` | Read reserve pool | No |
+| `REINFORCEMENTS_DEDUCT` | Atomic pool deduction | No |
+| `EVENTS_POLL` | Poll cross-server events | No |
+| `EVENTS_PUSH` | Push event for other servers | Yes |
+| `PLAYER_LOAD/SAVE` | Player state CRUD | No/Yes |
+| `STATS_WRITE` | Write statistics | Yes |
+
+### 11.4 Cross-Server Events
+
+Polling every 30-60 seconds via extension.
+
+| Event | Effect |
+|-------|--------|
+| `theater_objective_lost` | Other OPCOMs shift defensive |
+| `theater_objective_captured` | Other OPCOMs go offensive |
+| `theater_major_loss` | Triggers reinforcement allocation |
+| `theater_reinforcement_dispatched` | Receiving server pool boost |
+| `theater_supply_cut` | Theater-wide supply impact |
+| `theater_air_superiority_changed` | ATO availability change |
+
+### 11.5 PostgreSQL Schema
+
+```sql
+CREATE TABLE theater_state (
+    server_id VARCHAR(64) PRIMARY KEY,
+    map_name VARCHAR(64) NOT NULL,
+    faction_data JSONB NOT NULL,
+    objective_summary JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE faction_forces (
+    faction VARCHAR(64) NOT NULL,
+    server_id VARCHAR(64) NOT NULL,
+    force_type VARCHAR(32) NOT NULL,
+    count INTEGER NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (faction, server_id, force_type)
+);
+
+CREATE TABLE reinforcements (
+    faction VARCHAR(64) PRIMARY KEY,
+    infantry INTEGER DEFAULT 0,
+    motorized INTEGER DEFAULT 0,
+    mechanized INTEGER DEFAULT 0,
+    armor INTEGER DEFAULT 0,
+    air INTEGER DEFAULT 0,
+    last_modified TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE player_state (
+    player_uid VARCHAR(64) PRIMARY KEY,
+    display_name VARCHAR(128),
+    loadout TEXT,
+    medical_state JSONB,
+    position JSONB,
+    last_server VARCHAR(64),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE server_registry (
+    server_id VARCHAR(64) PRIMARY KEY,
+    map_name VARCHAR(64),
+    player_count INTEGER,
+    last_heartbeat TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE objectives (
+    objective_id VARCHAR(128) NOT NULL,
+    server_id VARCHAR(64) NOT NULL,
+    map_name VARCHAR(64) NOT NULL,
+    owner VARCHAR(64),
+    state VARCHAR(32),
+    priority INTEGER,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (objective_id, server_id)
+);
+
+CREATE TABLE cross_events (
+    id BIGSERIAL PRIMARY KEY,
+    source_server VARCHAR(64) NOT NULL,
+    event_type VARCHAR(128) NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    consumed_by JSONB DEFAULT '[]'::jsonb
+);
+CREATE INDEX idx_cross_events_type ON cross_events(event_type);
+CREATE INDEX idx_cross_events_created ON cross_events(created_at);
+```
+
+### 11.6 Graceful Degradation
+
+If PostgreSQL connection fails:
+- Mission continues with PNS-only persistence
+- Cross-server events queue locally, flush on reconnect
+- Player state falls back to PNS
+- OPCOM uses local data only
+- Extension retries every 60 seconds
+
+---
+
+## 12. Event Taxonomy
+
+All events: `atlas_<domain>_<action>` (camelCase)
+
+**Routing:**
+- `CBA_fnc_localEvent` — server-only
+- `CBA_fnc_globalEvent` — clients need it
+- `CBA_fnc_serverEvent` — client → server
+- `CBA_fnc_targetEvent` — server → specific client
+- PostgreSQL `cross_events` — inter-server
+
+**Complete list:**
+
+| Domain | Events |
+|--------|--------|
+| **core** | `ready`, `grid_cellUpdated`, `objective_registered`, `objective_stateChanged`, `player_cellChanged`, `player_connected`, `player_disconnected`, `marker_*`, `hc_*` |
+| **profile** | `created`, `destroyed`, `spawned`, `despawned`, `moved`, `damaged`, `orderReceived` |
+| **opcom** | `orderIssued`, `priorityChanged`, `phaseChanged`, `forceAllocated`, `reinforcementRequested`, `retreatOrdered` |
+| **logistics** | `requestCreated`, `convoyDispatched`, `convoyArrived`, `delivered`, `convoyDestroyed`, `supplyLevelChanged` |
+| **air** | `missionAssigned`, `missionComplete`, `aircraftLost`, `casOnStation`, `transportReady` |
+| **cqb** | `garrisoned`, `cleared` |
+| **civ** | `hostilityChanged`, `agentFleeing`, `agentQuestioned`, `populationChanged` |
+| **asymmetric** | `iedPlaced`, `iedDetonated`, `iedDisarmed`, `cellDiscovered`, `cellRecruited`, `intelGathered` |
+| **persist** | `saveStarted`, `saveComplete`, `loadComplete`, `theaterStateReceived`, `playerLoaded`, `playerSaved` |
+| **c2** | `taskCreated`, `taskCompleted`, `casRequested`, `transportRequested`, `resupplyRequested`, `reportSubmitted` |
+| **support** | `fireMission`, `fireMissionComplete`, `insertionUsed` |
+| **gc** | `cleaned` |
+
+---
+
+## 13. Module Initialization Order
+
+```
+Phase 0: atlas_core                                        [Server + Client]
+         ├── Spatial grid, sector analysis, objective registry
+         ├── Hosting model detection, HC manager ready
+         └── Fires: atlas_core_ready
+
+Phase 1: atlas_persist                                     [Server only]
+         ├── Check save data → load PNS / connect PostgreSQL
+         └── Fires: atlas_persist_loadComplete
+
+Phase 2: atlas_profile + atlas_placement                   [Server only]
+         ├── Profile registry, spawn/despawn handlers
+         ├── If no persistence: create initial profiles
+         └── Fires: atlas_placement_complete
+
+Phase 3: atlas_opcom, atlas_logistics, atlas_air,          [Server only]
+         atlas_cqb, atlas_civilian
+         └── All init in parallel
+
+Phase 4: atlas_asymmetric, atlas_support                   [Server only]
+         └── After OPCOM and civilian
+
+Phase 5: atlas_c2 (client), atlas_gc, atlas_ai,            [Mixed]
+         atlas_stats, atlas_admin
+```
+
+Modules gate on CBA events, not polling:
+```sqf
+["atlas_placement_complete", {
+    if (!ATLAS_isServerOrSP) exitWith {};
+    call ATLAS_fnc_opcom_init;
+}, true] call CBA_fnc_addEventHandlerArgs;
+```
+
+---
+
+## 14. PBO Directory Structure
+
+```
+@ATLAS_OS/
+├── addons/
+│   ├── atlas_core/          → fn_init, fn_grid*, fn_sector*, fn_cluster*, fn_objective*, fn_hc*, fn_log, fn_moduleRegister
+│   ├── atlas_profile/       → fn_init, fn_create, fn_destroy, fn_spawn, fn_despawn, fn_moveTo, fn_virtualMove, fn_syncFromSpawned, fn_serialize, fn_deserialize, fn_nextId
+│   ├── atlas_opcom/         → fn_init, fn_createSM, fn_assess, fn_plan, fn_execute, fn_monitor, fn_scoreObjective, fn_allocateForces, fn_handle*, fn_generateOrder, fn_insurgency*
+│   ├── atlas_logistics/     → fn_init, fn_processRequest, fn_routeConvoy, fn_dispatchConvoy, fn_playerRequest, fn_supplyCheck, fn_reinforcementPool
+│   ├── atlas_air/           → fn_init, fn_queueMission, fn_assignAircraft, fn_monitorMission, fn_cas, fn_cap, fn_transport, fn_sead
+│   ├── atlas_cqb/           → fn_init, fn_scanBuildings, fn_spawnGarrison, fn_despawnGarrison, fn_cachePositions
+│   ├── atlas_placement/     → fn_init, fn_parseOrbat, fn_distributeForces, fn_createProfiles
+│   ├── atlas_civilian/      → fn_init, fn_computeDensity, fn_spawnAgent, fn_returnAgent, fn_behaviorFSM, fn_interact, fn_hostility
+│   ├── atlas_asymmetric/    → fn_init, fn_placeIED, fn_detonateIED, fn_disarmIED, fn_cellManage, fn_cellRecruit, fn_intelProcess
+│   ├── atlas_persist/       → fn_init, fn_savePNS, fn_loadPNS, fn_serialize, fn_deserialize, fn_extension*, fn_theater*, fn_player*, fn_saveAll, fn_loadAll
+│   ├── atlas_c2/            → fn_init, fn_tablet*, fn_task*, fn_report*, fn_request*
+│   ├── atlas_support/       → fn_init, fn_fireMission, fn_insertionManager, fn_groupManager
+│   ├── atlas_gc/            → fn_init, fn_enqueue, fn_processQueue
+│   ├── atlas_ai/            → fn_init, fn_applySkill, fn_settingsInit
+│   ├── atlas_stats/         → fn_init, fn_recordEvent, fn_serialize
+│   └── atlas_admin/         → fn_init, fn_debugMenu, fn_teleport, fn_forceSpawn, fn_forceSave
+├── extensions/
+│   └── atlas_db/            → C++/Rust PostgreSQL bridge DLL
+├── mod.cpp
+├── meta.cpp
+└── README.md
+```
+
+---
+
+## 15. Performance Projections
+
+### Algorithmic Improvements
+
+| System | ALiVE | ATLAS.OS | Complexity Change |
+|---|---|---|---|
+| Data Access | Parallel-array hash (linear) | Native HashMap | **O(n) → O(1)** |
+| Profile Proximity | All × all players | Spatial grid: nearby cells | **O(n×m) → O(m×k)** |
+| OPCOM Decisions | Full recalculation | Dirty-flag skip | **O(n) → O(dirty)** |
+| Spawn/Despawn | Timer polling | Event-driven | **Polling → event** |
+| Civilian Agents | Create/destroy | Object pooling | **Fewer engine calls** |
+| Persistence | Serialize all | Incremental dirty-save | **O(n) → O(dirty)** |
+| GC | Scheduled bulk loop | PFH budget queue | **Bounded per-frame** |
+| AI Computation | All on server | HC distribution | **Linear with HC count** |
+
+### HC Distribution Impact
+
+| Setup | Server AI Load | Expected Throughput |
+|---|---|---|
+| No HC | 100% | Baseline |
+| 1 HC | ~50% | ~2x |
+| 2 HCs | ~33% | ~3x |
+| 3 HCs | ~25% | ~4x |
+
+*All projections require validation through benchmarking.*
+
+---
+
+## 16. Key Architectural Decisions
+
+1. **OPCOM + TACOM merged** — Eliminates IPC, one CBA state machine.
+2. **`atlas_asymmetric` separate** — IED/intel mechanics distinct from strategy. OPCOM publishes, asymmetric implements.
+3. **Two-tier persistence** — PNS fast/local, PostgreSQL cross-server. Graceful degradation if DB fails.
+4. **Polling for cross-server events** — Arma extensions can't receive push. 30-60s adequate for strategic events.
+5. **16 PBOs** — Balanced cohesion. Optional exclusion. HEMTT-friendly.
+6. **HC distribution in core** — Cross-cutting. All spawning modules benefit automatically.
+7. **All hosting models from day one** — Every module checks `ATLAS_isServerOrSP`. No dedicated-only surprises.
+
+---
+
+*This document is the blueprint for ATLAS.OS development. Implementation begins with `atlas_core` and `atlas_profile`, as all other modules depend on them.*
