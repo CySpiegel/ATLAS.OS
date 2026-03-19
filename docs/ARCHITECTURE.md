@@ -29,7 +29,9 @@
 19. [Detailed Module Internal Breakdowns](#19-module-breakdowns)
 20. [Full Spectrum Operations Design](#20-full-spectrum-operations)
 21. [ACE3 & KAT Medical Integration](#21-ace3-kat-integration)
-22. [Feature Parity Gap Analysis](#22-gap-analysis)
+22. [Asymmetric Player Operations & SpyderAddons Features](#22-asymmetric-player-ops)
+23. [Optional Mod Integration Philosophy](#23-optional-mod-integration)
+24. [Feature Parity Gap Analysis](#24-gap-analysis)
 
 ---
 
@@ -4207,9 +4209,344 @@ atlas_compat_ace/
 
 ---
 
-## 22. Feature Parity Gap Analysis
+## 22. Asymmetric Player Operations & SpyderAddons Features
 
-### 22.1 ALiVE Features — Full Mapping
+ATLAS incorporates features inspired by SpyderAddons (DavisBrown723) that enable players to operate on BOTH sides of an asymmetric conflict — as conventional forces conducting COIN, or as insurgents building an underground network. These features are integrated into existing ATLAS modules rather than being separate addons.
+
+### 22.1 Player-Side Insurgency System
+
+ALiVE and ATLAS `atlas_asymmetric` model AI-driven insurgency. This section adds **player-driven insurgency** — players can play AS the insurgent side, establishing infrastructure, recruiting fighters, manufacturing IEDs, and conducting operations against a conventional AI enemy.
+
+This is integrated into `atlas_asymmetric` with a mode flag:
+
+```sqf
+// In OPCOM configuration, insurgency mode now has two sub-modes:
+// "insurgency_ai"     → AI runs the insurgency (default, current behavior)
+// "insurgency_player" → Players run the insurgency via command board
+```
+
+#### Insurgent Installations (Player-Built)
+
+Players establish installations at locations they control:
+
+| Installation | Purpose | Requirements | Effect |
+|-------------|---------|-------------|--------|
+| **Recruitment HQ** | Recruit fighters from civilian population | Building + civilian population nearby | +recruits over time based on hostility |
+| **Weapons Depot** | Store and distribute weapons | Building + weapons delivered | Enables equipping recruited fighters |
+| **IED Factory** | Manufacture IEDs/VBIEDs | Building + construction supplies | Produces IEDs that can be placed |
+| **Ambush Point** | Pre-planned ambush position | Road/chokepoint + fighters | Quick-deploy ambush capability |
+| **Propaganda Center** | Increase civilian hostility toward enemy | Building + civilian population | +hostility, +recruitment rate |
+| **Safe House** | Hide fighters, store intel | Building in low-security area | Conceals installation from enemy recon |
+
+```sqf
+// Installation HashMap
+{
+    "id": string,
+    "type": "recruitHQ"|"weaponsDepot"|"iedFactory"|"ambushPoint"|"propaganda"|"safeHouse",
+    "pos": [x,y,z],
+    "building": object,
+    "side": side,
+    "strength": number (0-100),    // operational effectiveness
+    "assignedAgents": number,       // civilian agents working here
+    "discovered": boolean,          // enemy knows about it?
+    "discoveryLevel": number (0-1), // how close to being found
+    "production": HashMap,          // what it's producing and rate
+    "establishedAt": serverTime
+}
+```
+
+#### Insurgent Command Board
+
+A tablet/map interface for the insurgent player commander:
+
+```sqf
+// Command board panels:
+// 1. Operations Overview — recent activities, successes/failures
+// 2. Installation Map — all installations with status (color-coded markers)
+// 3. Fighter Management — recruited units, strength, assignments
+// 4. Order Dispatch — select operation type:
+//    - Plant IED at road (requires IED factory production)
+//    - Ambush convoy (requires ambush point + fighters)
+//    - Suicide attack (requires recruitment + radicalization)
+//    - Sabotage infrastructure (requires fighters + target)
+//    - Recruit bomber (requires propaganda + weapons)
+//    - Raid supply convoy (requires fighters + intel)
+// 5. Intel — gathered information about enemy movements, patrols, bases
+```
+
+**New `atlas_asymmetric` functions for player insurgency:**
+
+```
+fn_installationCreate.sqf        # Create installation at building
+fn_installationDestroy.sqf       # Destroy/abandon installation
+fn_installationProduce.sqf       # PFH: production cycle for factories
+fn_installationDiscovery.sqf     # Check if enemy recon found the installation
+fn_commandBoardOpen.sqf          # Open insurgent command board UI
+fn_commandBoardRefresh.sqf       # Update command board data
+fn_commandBoardOrder.sqf         # Issue order from command board
+fn_fighterRecruit.sqf            # Recruit fighters from civilian population
+fn_fighterAssign.sqf             # Assign fighters to installation or operation
+fn_operationPlan.sqf             # Plan an insurgent operation
+fn_operationExecute.sqf          # Execute planned operation
+```
+
+### 22.2 Detection & Incognito System
+
+For asymmetric gameplay where players (as insurgents or undercover operatives) must blend in with the civilian population and avoid detection by enemy AI.
+
+**Detection factors** (each contributes to a detection score):
+
+| Factor | Weight | Description |
+|--------|--------|-------------|
+| **Weapon visible** | +3.0 | Carrying a visible weapon (holstered/hidden = reduced) |
+| **Restricted gear** | +2.0 | Wearing military uniform, vest, or headgear |
+| **Restricted vehicle** | +2.5 | Driving military vehicle |
+| **Speed** | +1.5 | Moving faster than civilian speed limit (configurable) |
+| **Prohibited zone** | +3.0 | Inside a restricted/military area |
+| **Known hostile** | +5.0 | Previously identified as hostile |
+| **Incognito clothing** | -2.0 | Wearing civilian/disguise clothing |
+| **Incognito vehicle** | -1.5 | In a civilian vehicle |
+| **Night time** | -1.0 | Darkness reduces detection |
+
+```sqf
+// Detection state machine per player:
+// HIDDEN → enemy ignores, player blends with civilians
+// SUSPICIOUS → enemy watches closely, may approach to check
+// REVEALED → enemy engages, player is hostile
+
+// Transition thresholds (configurable via CBA Settings):
+// HIDDEN → SUSPICIOUS: detection score > 3.0
+// SUSPICIOUS → REVEALED: detection score > 5.0 (or hostile action taken)
+// REVEALED → HIDDEN: cooldown timer expires (default 120s) AND detection score < 2.0
+
+ATLAS_fnc_detection_evaluate = {
+    params ["_player"];
+    private _score = 0;
+
+    // Weapon check
+    if (currentWeapon _player != "") then { _score = _score + 3.0 };
+
+    // Gear check against restricted lists
+    if (uniform _player in ATLAS_detection_restrictedUniforms) then { _score = _score + 2.0 };
+    if (vest _player in ATLAS_detection_restrictedVests) then { _score = _score + 2.0 };
+
+    // Incognito gear reduces score
+    if (uniform _player in ATLAS_detection_incognitoUniforms) then { _score = _score - 2.0 };
+
+    // Vehicle check
+    private _veh = vehicle _player;
+    if (_veh != _player) then {
+        if (typeOf _veh in ATLAS_detection_restrictedVehicles) then { _score = _score + 2.5 }
+        else { _score = _score - 1.5 };
+    };
+
+    // Speed check
+    if (speed vehicle _player > ATLAS_detection_speedLimit) then { _score = _score + 1.5 };
+
+    // Zone check
+    if ([_player] call ATLAS_fnc_detection_inRestrictedZone) then { _score = _score + 3.0 };
+
+    // Night modifier
+    if (sunOrMoon < 0.5) then { _score = _score - 1.0 };
+
+    _score max 0
+};
+```
+
+**New functions:**
+
+```
+atlas_asymmetric/fnc/
+  fn_detectionInit.sqf           # Register detection PFH, load restricted gear lists
+  fn_detectionEvaluate.sqf       # Calculate detection score for player
+  fn_detectionUpdateState.sqf    # Transition detection state (hidden/suspicious/revealed)
+  fn_detectionApplyAI.sqf        # Set enemy AI awareness/hostility based on state
+  fn_detectionCooldown.sqf       # Manage cooldown timer after reveal
+  fn_detectionInRestrictedZone.sqf # Check if player is in restricted area
+```
+
+**CBA Settings for detection:**
+
+```
+ATLAS - Detection System
+  ├── Enable Detection          [Yes / No, default No]          (mission setting)
+  ├── Reveal Threshold          [3.0-8.0, default 5.0]         (runtime tunable)
+  ├── Suspicious Threshold      [1.0-5.0, default 3.0]         (runtime tunable)
+  ├── Cooldown Time             [30-300s, default 120]          (runtime tunable)
+  ├── Speed Limit               [20-80 km/h, default 60]       (runtime tunable)
+  └── Night Modifier            [0.0-2.0, default 1.0]         (runtime tunable)
+```
+
+### 22.3 AI Recruitment System
+
+Players can recruit AI soldiers at designated recruitment points (bases, FOBs) or through the insurgent recruitment HQ:
+
+```sqf
+// Recruitment HashMap
+{
+    "availableUnits": Array<classname>,   // filtered by faction
+    "maxSquadSize": number (default 10),
+    "faction": string,
+    "whitelist": Array<classname>,        // only these units
+    "blacklist": Array<classname>,        // exclude these
+    "cost": HashMap<classname, number>    // optional cost per unit type
+}
+
+// Conventional side: recruit at FOB/MOB, from faction pool
+// Insurgent side: recruit from civilian population (requires recruitment HQ)
+// Cost can be: manpower points, money, or reputation-gated
+```
+
+**New functions:**
+
+```
+atlas_support/fnc/
+  fn_recruitInit.sqf             # Initialize recruitment points at bases
+  fn_recruitOpenUI.sqf           # Show recruitment dialog
+  fn_recruitUnit.sqf             # Recruit specific unit, add to player group
+  fn_recruitGetAvailable.sqf     # Get available unit types for faction
+  fn_recruitCheckCost.sqf        # Verify player/base can afford recruitment
+```
+
+### 22.4 Ambient Environment System
+
+Ambient world features that make the map feel alive beyond just civilians and military:
+
+```sqf
+// Ambient spawning near players (integrated into atlas_civilian)
+ATLAS_ambientConfig = createHashMapFromArray [
+    ["enableAnimals", true],
+    ["animalTypes", ["Goat_Random_F", "Sheep_Random_F", "Hen_Random_F"]],
+    ["animalChance", 0.3],          // 30% chance per eligible cell
+    ["animalHerdSize", [3, 8]],     // min/max per herd
+    ["enableCulturalAudio", true],  // call to prayer, market sounds
+    ["culturalAudioType", "islamic"], // "islamic", "church", "none"
+    ["prayerTimes", [5, 7, 12, 15, 18, 20]] // in-game hours
+];
+```
+
+**New `atlas_civilian` functions:**
+
+```
+fn_ambientSpawnAnimals.sqf       # Spawn animal herds in rural cells
+fn_ambientDespawnAnimals.sqf     # Return animals to pool when players leave
+fn_ambientCulturalAudio.sqf      # Play cultural audio at scheduled times
+fn_ambientCulturalCivBehavior.sqf # Civilians respond to cultural events (gather, sit)
+```
+
+### 22.5 Loadout Persistence
+
+Player loadout management integrated into `atlas_persist`:
+
+```sqf
+// Save loadout with custom name
+ATLAS_fnc_persist_loadoutSave = {
+    params ["_player", "_name"];
+    private _loadout = getUnitLoadout _player;
+    private _savedLoadouts = _player getVariable ["ATLAS_savedLoadouts", createHashMap];
+    _savedLoadouts set [_name, _loadout];
+    _player setVariable ["ATLAS_savedLoadouts", _savedLoadouts];
+    // Persist to PNS/PostgreSQL
+    _player setVariable ["ATLAS_loadouts_dirty", true];
+};
+
+// Load saved loadout
+ATLAS_fnc_persist_loadoutLoad = {
+    params ["_player", "_name"];
+    private _savedLoadouts = _player getVariable ["ATLAS_savedLoadouts", createHashMap];
+    private _loadout = _savedLoadouts get _name;
+    if (!isNil "_loadout") then {
+        _player setUnitLoadout _loadout;
+    };
+};
+```
+
+**New functions:**
+
+```
+atlas_persist/fnc/
+  fn_loadoutSave.sqf             # Save named loadout
+  fn_loadoutLoad.sqf             # Load named loadout
+  fn_loadoutDelete.sqf           # Delete saved loadout
+  fn_loadoutGetAll.sqf           # Get all saved loadout names
+  fn_loadoutAutoApply.sqf        # Auto-apply loadout on respawn (if configured)
+```
+
+### 22.6 Vehicle Spawner
+
+Integrated into `atlas_support` for base-specific vehicle spawning:
+
+```
+atlas_support/fnc/
+  fn_vehicleSpawnerInit.sqf      # Register spawn points at bases
+  fn_vehicleSpawnerOpenUI.sqf    # Show vehicle selection dialog
+  fn_vehicleSpawnerSpawn.sqf     # Spawn selected vehicle at spawn point
+  fn_vehicleSpawnerGetAvailable.sqf # Get available vehicles filtered by faction/type
+  fn_vehicleSpawnerInfo.sqf      # Get vehicle specs (speed, armor, seats, fuel)
+```
+
+---
+
+## 23. Optional Mod Integration Philosophy
+
+### 23.1 Core Principle: No Hard Dependencies
+
+ATLAS.OS has exactly **two** hard dependencies: **Arma 3** and **CBA_A3**. Everything else is optional. The mod must function fully without ACE3, KAT, or any other community mod.
+
+### 23.2 Soft Dependency Pattern
+
+Every optional integration follows this exact pattern:
+
+```sqf
+// 1. Detection (in XEH_preInit.sqf of the compat PBO)
+ATLAS_<modName>Loaded = isClass (configFile >> "CfgPatches" >> "<mod_cfgPatch>");
+
+// 2. Every function that touches the optional mod checks first
+if (!ATLAS_<modName>Loaded) exitWith {
+    // Vanilla fallback behavior
+};
+// ... mod-specific code ...
+
+// 3. Config.cpp of the compat PBO does NOT require the mod
+class CfgPatches {
+    class atlas_compat_ace {
+        // NOTE: ace_common is NOT in requiredAddons
+        // This PBO loads regardless of whether ACE is present
+        requiredAddons[] = {"atlas_core"};
+    };
+};
+```
+
+### 23.3 Supported Optional Mods
+
+| Mod | Detection Variable | Compat PBO | What It Enables |
+|-----|-------------------|-----------|-----------------|
+| **ACE3** | `ATLAS_aceLoaded` | `atlas_compat_ace` | Medical, interactions, cargo, explosives, captives, fortify, repair, weather, hearing |
+| **KAT Medical** | `ATLAS_katLoaded` | `atlas_compat_ace` | Blood types, airway, SpO2, enhanced CASEVAC, expanded pharmacy |
+| **TFAR** | `ATLAS_tfarLoaded` | Future: `atlas_compat_tfar` | Radio-based SIGINT for intel, communication range limits |
+| **ACRE2** | `ATLAS_acreLoaded` | Future: `atlas_compat_acre` | Same as TFAR but for ACRE2 |
+
+### 23.4 Fallback Behavior Table
+
+| Feature | With ACE3 | Without ACE3 (Vanilla) |
+|---------|----------|----------------------|
+| Civilian interaction | ACE interact menu actions | addAction on civilians |
+| Medical CASEVAC | ACE wounds, blood, treatment | setDamage, simple heal |
+| Medical persistence | Full wound/medication state saved | Damage value only |
+| IED placement | ACE explosive triggers (pressure plate) | createMine |
+| IED disarm | ACE defusal system | addAction + skill check |
+| Supply crates | ACE cargo loading, drag/carry | attachTo vehicle |
+| Civilian detention | ACE captives (handcuff/escort) | disableAI + animation |
+| Vehicle repair | ACE component repair state | setHitPointDamage |
+| Base construction | ACE fortify budget system | Simple object placement |
+| Hearing (IED blast) | ACE hearing damage | No effect |
+| Weather sync | ACE weather API | Vanilla setOvercast/setRain |
+
+---
+
+## 24. Feature Parity Gap Analysis
+
+### 24.1 ALiVE + SpyderAddons Features — Full Mapping
 
 Every feature ALiVE provides, mapped to its ATLAS equivalent:
 
@@ -4281,24 +4618,38 @@ Every feature ALiVE provides, mapped to its ATLAS equivalent:
 | **Compositions/Data** | | | | |
 | Group definitions | grp_a3, composition_* | atlas_placement (config) | Covered | Data-driven |
 | Tablet 3D model | m_tablet, c_tablet | atlas_c2 (assets) | Needs asset | Create or reuse |
+| **SpyderAddons Features** | | | | |
+| Ambient animals | amb_ambiance | atlas_civilian (§22.4) | Covered | Herds near players |
+| Civilian vehicle traffic | amb_ambiance | atlas_civilian | Covered | Already designed |
+| Enemy ambient patrols | amb_ambiance | atlas_opcom | Covered | Patrol orders |
+| Civilian interrogation | civ_interact | atlas_civilian | Covered | Already designed |
+| Loadout organizer | sup_loadout | atlas_persist (§22.5) | Covered | Integrated persistence |
+| AI recruitment | sup_recruit | atlas_support (§22.3) | Covered | Base-integrated |
+| Detection/incognito | mil_detection | atlas_asymmetric (§22.2) | Covered | Full incognito system |
+| Vehicle spawner | sup_vehiclespawn | atlas_support (§22.6) | Covered | Base-integrated |
+| Call to prayer / ambiance | civ_callToPrayer | atlas_civilian (§22.4) | Covered | Cultural audio system |
+| Player-side insurgency | mil_insurgency | atlas_asymmetric (§22.1) | Covered | Command board + installations |
+| Insurgent installations | mil_insurgency | atlas_asymmetric (§22.1) | Covered | 6 installation types |
+| Insurgent command board | mil_insurgency | atlas_asymmetric (§22.1) | Covered | Full operations UI |
 
-### 22.2 Coverage Summary
+### 24.2 Coverage Summary
 
-| Category | ALiVE Features | ATLAS Covered | ATLAS Improved | Deferred | New in ATLAS |
-|----------|---------------|--------------|----------------|----------|-------------|
-| Core/Data | 5 | 5 | 3 | 0 | 2 (PostgreSQL, HC) |
-| Profiles | 5 | 5 | 4 | 0 | 1 (road pathfinding) |
-| Military AI | 6 | 6 | 4 | 0 | 3 (intel, bases, frontline) |
+| Category | Features | ATLAS Covered | ATLAS Improved | Deferred | New in ATLAS |
+|----------|---------|--------------|----------------|----------|-------------|
+| Core/Data | 5 | 5 | 3 | 0 | 2 |
+| Profiles | 5 | 5 | 4 | 0 | 1 |
+| Military AI | 6 | 6 | 4 | 0 | 3 |
 | Combat | 5 | 5 | 2 | 0 | 0 |
-| Civilian | 4 | 4 | 3 | 0 | 2 (H&M, CASEVAC) |
+| Civilian | 4 | 4 | 3 | 0 | 2 |
 | Support | 4 | 4 | 1 | 0 | 0 |
-| C2/Reporting | 5 | 5 | 3 | 0 | 3 (tasking, intel, frontline) |
-| Utilities | 8 | 8 | 2 | 0 | 2 (adaptive, HC) |
+| C2/Reporting | 5 | 5 | 3 | 0 | 3 |
+| Utilities | 8 | 8 | 2 | 0 | 2 |
 | Peripheral | 8 | 4 | 0 | 3 | 0 |
-| Compat/ACE | 1 | 1 | 1 | 0 | 2 (KAT, full ACE bridge) |
-| **Total** | **51** | **47** | **23** | **3** | **15** |
+| Compat/ACE | 1 | 1 | 1 | 0 | 2 |
+| SpyderAddons | 12 | 12 | 5 | 0 | 3 |
+| **Total** | **63** | **59** | **28** | **3** | **18** |
 
-### 22.3 Deferred Items (Phase 2)
+### 24.3 Deferred Items (Phase 2)
 
 These are "nice to have" features that don't affect core simulation:
 
@@ -4307,7 +4658,7 @@ These are "nice to have" features that don't affect core simulation:
 3. **XStream Spectator** (`sys_xstream`) — Advanced spectator camera. Arma 3 now has built-in spectator. Low priority.
 4. **ORBAT Creator** (`sys_orbatcreator`) — ALiVE's is 312KB. This is effectively a separate application. Phase 2 as its own project.
 
-### 22.4 New ATLAS Features Beyond ALiVE
+### 24.4 New ATLAS Features Beyond ALiVE & SpyderAddons
 
 | Feature | Section | Description |
 |---------|---------|-------------|
@@ -4326,6 +4677,9 @@ These are "nice to have" features that don't affect core simulation:
 | KAT Medical support | §21.9 | Blood types, airway, SpO2, enhanced CASEVAC |
 | Road graph pathfinding | §20.1 | A* on actual road network for virtual movement |
 | Multi-session campaigns | §20.9 | Full persistent campaign across sessions/servers |
+| Player-side insurgency | §22.1 | Players AS insurgents with installations and command board |
+| Detection/incognito | §22.2 | Disguise mechanics for asymmetric player gameplay |
+| Ambient environment | §22.4 | Animals, cultural audio, prayer calls |
 
 ---
 
