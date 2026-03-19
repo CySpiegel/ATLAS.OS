@@ -27,6 +27,7 @@
 17. [Mission Editor Workflow & Configuration](#17-mission-editor-workflow)
 18. [Coding Standards — No God Objects](#18-coding-standards)
 19. [Detailed Module Internal Breakdowns](#19-module-breakdowns)
+20. [Full Spectrum Operations Design](#20-full-spectrum-operations)
 
 ---
 
@@ -2324,6 +2325,934 @@ fn_forceLoad.sqf                 # Trigger reload from persistence
 fn_markProfiles.sqf              # Toggle debug markers showing all virtual profiles
 fn_markObjectives.sqf            # Toggle debug markers for objectives
 fn_hcStatus.sqf                  # Show HC load distribution status
+```
+
+---
+
+## 20. Full Spectrum Operations Design
+
+This section describes the expanded gameplay systems that go beyond ALiVE's feature set. These systems transform ATLAS from a "spawn and fight" framework into a persistent multi-session operations platform supporting full spectrum warfare — infantry, vehicles, air, naval, logistics, intelligence, and hearts & minds.
+
+---
+
+### 20.1 Virtual Movement Engine
+
+Virtual profiles (units that exist as data only) must move realistically across the map without consuming AI resources. This is the most performance-critical system in ATLAS — hundreds of virtual profiles moving simultaneously.
+
+#### 20.1.1 Movement Types by Domain
+
+| Domain | Movement Method | Pathfinding | Speed Factors |
+|--------|----------------|-------------|---------------|
+| **Infantry** | Follow roads when available, cross-country otherwise | Road graph preferred, fallback to direct | Terrain type, road quality, formation |
+| **Wheeled vehicles** | Must follow roads (cannot cross-country realistically) | Road graph mandatory | Road type, vehicle class, convoy spacing |
+| **Tracked vehicles** | Prefer roads, can cross-country | Road graph preferred, cross-country fallback | Terrain, road type, vehicle weight |
+| **Air** | Direct point-to-point at altitude | Direct with waypoints for orbits | Aircraft type (helo vs fixed-wing), altitude |
+| **Naval** | Coastal or open water routes | Coastline graph + open water direct | Ship type, sea state, depth |
+
+#### 20.1.2 Road Graph
+
+At mission start, `atlas_core` builds a road graph from Arma's road network:
+
+```sqf
+// Road graph structure
+ATLAS_roadGraph = createHashMap;
+// Key: road segment ID (string)
+// Value: HashMap {
+//   "start": [x,y,z],
+//   "end": [x,y,z],
+//   "length": number (meters),
+//   "type": "highway"|"main"|"secondary"|"track",
+//   "speedLimit": number (km/h — based on road type),
+//   "neighbors": Array<segmentId>  // connected road segments
+// }
+
+// Road type speed limits (km/h, baseline for wheeled vehicles)
+// highway = 80, main = 60, secondary = 40, track = 20
+
+// Build graph from Arma road objects
+ATLAS_fnc_core_buildRoadGraph = {
+    private _roads = [];
+    // Collect road segments from all sectors
+    {
+        private _sectorRoads = roadsConnectedTo _x;
+        // ... build graph edges from road connections ...
+    } forEach (allMapRoads);
+    // A* pathfinding uses this graph
+};
+```
+
+#### 20.1.3 Pathfinding (A* on Road Graph)
+
+```sqf
+// fn_pathfindRoad.sqf — A* pathfinding on road graph
+// Params: [startPos, endPos, vehicleType]
+// Returns: Array<[x,y,z]> waypoints along roads
+//
+// Heuristic: euclidean distance to goal
+// Edge cost: segment length / speed for vehicle type on that road type
+// Falls back to direct path if no road connection exists
+
+// fn_pathfindDirect.sqf — straight-line with terrain avoidance
+// Used for: infantry cross-country, tracked vehicles off-road, emergency fallback
+// Params: [startPos, endPos]
+// Returns: Array<[x,y,z]> waypoints (simplified, few intermediate points)
+
+// fn_pathfindNaval.sqf — coastal/open water pathfinding
+// Uses: coastline waypoints + open water direct segments
+// Avoids: land masses (uses isOnRoad/surfaceIsWater checks)
+
+// fn_pathfindAir.sqf — direct point-to-point with altitude
+// Params: [startPos, endPos, altitude, aircraftType]
+// Returns: Array<[x,y,z]> (typically just [start, end] with altitude)
+```
+
+#### 20.1.4 Speed Calculation
+
+```sqf
+// fn_virtualMoveSpeed.sqf
+// Calculate effective speed for a virtual profile based on type, terrain, and road
+ATLAS_fnc_profile_virtualMoveSpeed = {
+    params ["_profile", "_currentSegment"];
+
+    private _type = _profile get "type";
+    private _baseSpeed = switch (_type) do {
+        case "infantry":    { 5 };    // 5 km/h walking
+        case "motorized":   { 60 };   // 60 km/h on road
+        case "mechanized":  { 45 };   // 45 km/h
+        case "armor":       { 35 };   // 35 km/h
+        case "air":         { 250 };  // 250 km/h helicopter (fixed-wing faster)
+        case "naval":       { 30 };   // 30 km/h
+        default             { 5 };
+    };
+
+    // Road type modifier (ground vehicles only)
+    if (_type in ["motorized", "mechanized", "armor", "infantry"]) then {
+        private _roadType = if (isNil "_currentSegment") then { "none" }
+                           else { _currentSegment get "type" };
+        private _roadMod = switch (_roadType) do {
+            case "highway":   { 1.0 };
+            case "main":      { 0.8 };
+            case "secondary": { 0.6 };
+            case "track":     { 0.35 };
+            case "none":      { if (_type == "infantry") then { 0.7 } else { 0.2 } };
+            default           { 0.5 };
+        };
+        _baseSpeed = _baseSpeed * _roadMod;
+    };
+
+    // Global speed multiplier (CBA Setting, like ALiVE's speed multiplier)
+    _baseSpeed = _baseSpeed * ATLAS_setting_virtualSpeedMultiplier;
+
+    // Convert km/h to m/s for movement calculation
+    _baseSpeed / 3.6
+};
+```
+
+#### 20.1.5 Virtual Movement Step (Per-Frame Processing)
+
+```sqf
+// fn_virtualMoveStep.sqf — move one profile one tick
+// Called from PFH, processes N profiles per frame
+ATLAS_fnc_profile_virtualMoveStep = {
+    params ["_profile", "_deltaTime"];
+
+    private _pos = _profile get "pos";
+    private _waypoints = _profile get "waypoints";
+    if (_waypoints isEqualTo []) exitWith { false };
+
+    private _targetWP = _waypoints#0;
+    private _speed = [_profile, _profile get "_currentRoadSegment"] call ATLAS_fnc_profile_virtualMoveSpeed;
+    private _dist = _speed * _deltaTime;
+    private _remaining = _pos distance2D _targetWP;
+
+    if (_dist >= _remaining) then {
+        // Reached waypoint
+        _profile set ["pos", _targetWP];
+        _waypoints deleteAt 0;
+
+        if (_waypoints isEqualTo []) then {
+            // Destination reached
+            ["atlas_profile_waypointComplete", [_profile get "id"]] call CBA_fnc_localEvent;
+        };
+        true
+    } else {
+        // Move toward waypoint
+        private _dir = _pos getDir _targetWP;
+        private _newPos = _pos getPos [_dist, _dir];
+        _newPos set [2, 0]; // ground level for virtual
+        _profile set ["pos", _newPos];
+
+        // Update grid cell if changed
+        private _newCell = [floor ((_newPos#0) / ATLAS_GRID_SIZE), floor ((_newPos#1) / ATLAS_GRID_SIZE)];
+        private _oldCell = _profile get "_gridCell";
+        if (!(_newCell isEqualTo _oldCell)) then {
+            [_profile get "id", "profiles", _oldCell, _newCell] call ATLAS_fnc_core_gridMove;
+            _profile set ["_gridCell", _newCell];
+        };
+
+        _profile set ["_dirty", true];
+        false
+    };
+};
+```
+
+#### 20.1.6 Convoy Formation Movement
+
+When multiple profiles move as a convoy (logistics), they maintain spacing:
+
+```sqf
+// fn_convoyMove.sqf — coordinated movement of multiple profiles
+// Lead vehicle pathfinds; followers maintain interval along same route
+// Params: [convoyHashMap] (contains ordered array of profile IDs)
+// Spacing: 50m between vehicles on road, 100m off-road
+// If lead is destroyed, next vehicle becomes lead
+```
+
+---
+
+### 20.2 Base Infrastructure System
+
+#### 20.2.1 Base Hierarchy
+
+Real military operations use a tiered base structure. ATLAS models this as a **supply chain tree**:
+
+```
+Main Operating Base (MOB)
+  └── Forward Operating Base (FOB)
+        ├── Combat Outpost (COP)
+        │     ├── Patrol Base (PB)
+        │     │     └── Observation Post (OP)
+        │     └── Patrol Base (PB)
+        └── Combat Outpost (COP)
+              └── Patrol Base (PB)
+```
+
+| Base Type | Size | Garrison | Persistence | Supply Needs | Player Buildable? |
+|-----------|------|----------|-------------|-------------|-------------------|
+| **MOB** | Division/Brigade | 100+ | Permanent (mission-placed) | Self-sufficient (source) | No (editor-placed) |
+| **FOB** | Battalion | 30-60 | Persistent (survives restart) | High: ammo, fuel, food, water, medical, construction | Yes (with resources) |
+| **COP** | Company | 15-30 | Persistent | Medium: ammo, fuel, food, water, medical | Yes (with resources) |
+| **PB** | Platoon | 8-15 | Session (may not persist) | Low: ammo, food, water | Yes (lightweight) |
+| **OP** | Squad/Fireteam | 2-6 | Temporary | Minimal: ammo, water | Yes (immediate) |
+
+#### 20.2.2 Base Data Structure
+
+```sqf
+// Base HashMap
+ATLAS_baseRegistry = createHashMap;  // baseId -> base HashMap
+
+// Base creation
+private _base = createHashMapFromArray [
+    ["id", "ATLAS_B_001"],
+    ["type", "FOB"],           // MOB, FOB, COP, PB, OP
+    ["name", "FOB Warrior"],
+    ["pos", [5000, 6000, 0]],
+    ["side", west],
+    ["parent", "ATLAS_B_000"], // parent base ID (MOB)
+    ["children", []],          // child base IDs
+    ["garrison", []],          // profile IDs assigned as garrison
+    ["maxGarrison", 60],
+    ["supplies", createHashMapFromArray [
+        ["ammo", 100],         // 0-100 percentage
+        ["fuel", 100],
+        ["food", 80],
+        ["water", 80],
+        ["medical", 90],
+        ["construction", 50]
+    ]],
+    ["consumptionRate", createHashMapFromArray [
+        ["ammo", 0.5],         // % per hour (combat increases this)
+        ["fuel", 0.3],
+        ["food", 1.0],         // always consumed
+        ["water", 1.5],        // always consumed, faster in hot weather
+        ["medical", 0.2]
+    ]],
+    ["supplyRoute", "ATLAS_B_000"],  // which base supplies this one
+    ["state", "active"],       // active, contested, overrun, abandoned
+    ["established", serverTime],
+    ["_dirty", false],
+    ["_gridCell", [50, 60]]
+];
+```
+
+#### 20.2.3 Supply Consumption and Automatic Resupply
+
+```sqf
+// PFH: every 60 seconds, consume supplies at each base
+// When supplies drop below threshold, automatically create logistics request
+ATLAS_fnc_base_consumeSupplies = {
+    {
+        private _base = _y;
+        if (_base get "state" != "active") then { continue };
+
+        private _supplies = _base get "supplies";
+        private _rates = _base get "consumptionRate";
+        private _garrisonCount = count (_base get "garrison");
+        private _scale = _garrisonCount / (_base get "maxGarrison" max 1);
+
+        {
+            private _resource = _x;
+            private _current = _supplies get _resource;
+            private _rate = (_rates getOrDefault [_resource, 0]) * _scale;
+            private _newLevel = (_current - _rate / 60) max 0;  // per-second tick
+            _supplies set [_resource, _newLevel];
+
+            // Auto-request resupply when below 30%
+            if (_newLevel < 30 && _current >= 30) then {
+                ["atlas_logistics_requestCreated", [createHashMapFromArray [
+                    ["type", "BASE_RESUPPLY"],
+                    ["resource", _resource],
+                    ["destination", _base get "id"],
+                    ["priority", if (_newLevel < 15) then { 900 } else { 500 }],
+                    ["amount", 70 - _newLevel]  // fill to 70%
+                ]]] call CBA_fnc_localEvent;
+            };
+        } forEach ["ammo", "fuel", "food", "water", "medical"];
+
+        _base set ["_dirty", true];
+    } forEach ATLAS_baseRegistry;
+};
+```
+
+#### 20.2.4 Player Base Establishment
+
+Players can establish new bases by requesting construction through C2 or by physically setting up at a location:
+
+```sqf
+// Events for base lifecycle
+"atlas_base_established"     // new base created
+"atlas_base_upgraded"        // base type upgraded (PB → COP)
+"atlas_base_abandoned"       // garrison withdrawn
+"atlas_base_overrun"         // enemy captured base
+"atlas_base_supplyLow"       // supply below critical threshold
+"atlas_base_supplyDepleted"  // supply at zero — garrison combat effectiveness drops
+```
+
+---
+
+### 20.3 Natural Frontline System
+
+#### 20.3.1 Influence Map
+
+Instead of a simple line, ATLAS uses an **influence map** — each grid cell has an influence value per side. The frontline is where opposing influences meet.
+
+```sqf
+ATLAS_influenceMap = createHashMap;  // cellKey -> HashMap<side, influence value>
+
+// Influence sources:
+// - Controlled objectives: +50 influence, decays with distance
+// - Active bases (FOB/COP): +30 influence
+// - Spawned unit groups: +10 per group
+// - Virtual profiles: +5 per profile
+// - Player presence: +15 per player
+
+ATLAS_fnc_frontline_calculateInfluence = {
+    // Reset all cells
+    { _y set [west, 0]; _y set [east, 0]; } forEach ATLAS_influenceMap;
+
+    // Add influence from objectives
+    {
+        private _obj = _y;
+        private _owner = _obj get "owner";
+        if (_owner in [west, east]) then {
+            private _pos = _obj get "pos";
+            private _strength = _obj get "priority" / 10;  // 0-100
+
+            // Spread influence to nearby cells (decay with distance)
+            private _cells = [_pos, 2000] call ATLAS_fnc_core_gridQuery;
+            {
+                private _cellKey = _x;
+                private _cellData = ATLAS_influenceMap getOrDefault [_cellKey, createHashMap];
+                private _dist = _pos distance2D (/* cell center */);
+                private _influence = _strength * (1 - (_dist / 2000));
+                _cellData set [_owner, (_cellData getOrDefault [_owner, 0]) + _influence];
+                ATLAS_influenceMap set [_cellKey, _cellData];
+            } forEach _cells;
+        };
+    } forEach ATLAS_objectiveRegistry;
+
+    // Add influence from bases, profiles, players (similar pattern)
+    // ...
+};
+```
+
+#### 20.3.2 Frontline Extraction
+
+The frontline is the set of cells where opposing influences are roughly equal:
+
+```sqf
+// fn_frontlineExtract.sqf
+// Returns array of positions where the frontline passes
+ATLAS_fnc_frontline_extract = {
+    params ["_side1", "_side2"];
+    private _frontlinePoints = [];
+
+    {
+        private _cellKey = _x;
+        private _cellData = _y;
+        private _inf1 = _cellData getOrDefault [_side1, 0];
+        private _inf2 = _cellData getOrDefault [_side2, 0];
+
+        // Frontline = cells where both sides have significant influence
+        // and the ratio is close (neither side dominates)
+        if (_inf1 > 5 && _inf2 > 5) then {
+            private _ratio = _inf1 / (_inf2 max 0.1);
+            if (_ratio > 0.3 && _ratio < 3.0) then {
+                _frontlinePoints pushBack (/* cell center position */);
+            };
+        };
+    } forEach ATLAS_influenceMap;
+
+    // Sort points to form a coherent line (nearest-neighbor chain)
+    [_frontlinePoints] call ATLAS_fnc_frontline_sortPoints
+};
+```
+
+#### 20.3.3 Map Layer Toggle
+
+The C2 tablet shows the frontline as a toggleable map layer:
+- **Influence heatmap**: colored overlay showing each side's influence strength
+- **Frontline**: a line/band drawn where influences meet
+- **Territory shading**: areas firmly controlled by each side get a transparent color overlay
+- Toggle independently: influence, frontline, territory, all off
+
+```sqf
+// Events
+"atlas_frontline_updated"    // frontline recalculated (every 60-120s)
+// Payload: [frontlinePoints, influenceMap snapshot]
+```
+
+---
+
+### 20.4 Enhanced Tactical Commander
+
+#### 20.4.1 OPCOM Intelligence Layer
+
+OPCOM doesn't have perfect information. It operates on an **intel picture** that must be built from:
+
+| Intel Source | Accuracy | Freshness | Range |
+|-------------|----------|-----------|-------|
+| **Player SPOTREP** | High (player confirmed) | Real-time | Line of sight |
+| **Patrol contact** | High | Real-time | Contact range |
+| **Recon mission** | Medium-High | Minutes old | Recon area |
+| **SIGINT** | Medium | Minutes-hours | Wide area |
+| **Civilian questioning** | Low-Medium | Hours old | Local area |
+| **Pattern analysis** | Low | Predictive | Theater-wide |
+| **Stale intel** | Degrades over time | Expires after configurable period | Historical |
+
+```sqf
+// Intel entry HashMap
+ATLAS_intelRegistry = createHashMap;  // intelId -> intel HashMap
+{
+    "id": string,
+    "type": "contact"|"activity"|"installation"|"movement"|"ied"|"cell",
+    "pos": [x,y,z],
+    "side": side (observed enemy),
+    "source": "player"|"patrol"|"recon"|"sigint"|"civilian"|"analysis",
+    "confidence": number (0-1),   // degrades over time
+    "size": "fireteam"|"squad"|"platoon"|"company"|"unknown",
+    "details": string,
+    "reportedAt": serverTime,
+    "reportedBy": string (playerId or profileId),
+    "verified": boolean,          // confirmed by second source
+    "_decayRate": number          // confidence loss per minute
+}
+```
+
+#### 20.4.2 OPCOM Decision-Making with Intel
+
+OPCOM uses intel to make better decisions:
+
+```sqf
+// In fn_assess.sqf — OPCOM assessment now factors intel
+// Known enemy positions (high confidence) → plan attacks/defenses
+// Suspected positions (medium confidence) → assign recon missions
+// Stale intel (low confidence) → deprioritize, request fresh recon
+// No intel on area → mark as "fog of war", avoid committing forces
+
+// OPCOM can request specific intel:
+"atlas_opcom_recon_requested"    // OPCOM needs eyes on an area
+// → atlas_c2 generates recon task for players
+// → or OPCOM assigns recon order to a profile
+```
+
+#### 20.4.3 OPCOM Logistics Awareness
+
+OPCOM proactively manages logistics, not just combat:
+
+```sqf
+// Before ordering an attack, OPCOM checks:
+// 1. Do attacking forces have enough ammo? (ammoLevel > 0.6)
+// 2. Is a supply route available? (road connection to friendly base)
+// 3. Is the nearest base stocked? (supplies > 30%)
+// If not → order resupply first, THEN attack
+
+// OPCOM base management:
+// - Request FOB establishment when frontline pushes forward
+// - Request COP establishment to support persistent presence
+// - Order garrison reinforcement when base is threatened
+// - Order base abandonment if position becomes untenable
+```
+
+#### 20.4.4 Tactical Orders Expansion
+
+Beyond ALiVE's basic orders, ATLAS OPCOM issues nuanced tactical orders:
+
+| Order Type | Description | When Issued |
+|-----------|-------------|-------------|
+| ATTACK | Assault an objective | Superior force ratio + adequate supply |
+| DEFEND | Hold an objective | Objective under threat or high value |
+| GARRISON | Static defense in buildings | CQB-suitable objectives |
+| PATROL | Area patrol between waypoints | Secure areas, detect threats |
+| AMBUSH | Set ambush on likely enemy route | Enemy movement detected on road |
+| WITHDRAW | Retreat to fallback position | Force ratio unfavorable |
+| REINFORCE | Move to support engaged friendly | Friendly under attack, reserves available |
+| RECON | Scout an area, report findings | Stale or no intel on area |
+| SCREEN | Light force covering frontline sector | Frontline monitoring |
+| ESTABLISH_BASE | Set up FOB/COP/PB at position | Frontline advance, need forward presence |
+| SUPPLY_RUN | Escort supplies to base | Base supplies critical |
+| QRF | Quick Reaction Force — rapid deploy | Friendly base under attack |
+
+---
+
+### 20.5 Player Tasking Engine
+
+#### 20.5.1 Contextual Mission Generation
+
+The system generates player missions based on OPCOM's needs, frontline state, base requirements, and intel gaps. Missions feel natural because they arise from the simulation's actual state.
+
+```sqf
+// Mission generation sources
+ATLAS_fnc_c2_generateMissions = {
+    private _missions = [];
+
+    // 1. OPCOM requests recon → Recon mission for players
+    {
+        private _intel = _y;
+        if (_intel get "confidence" < 0.3 && _intel get "reportedAt" + 1800 < serverTime) then {
+            _missions pushBack [createHashMapFromArray [
+                ["type", "RECON"],
+                ["title", format ["Recon Area %1", _intel get "pos" call ATLAS_fnc_posToGrid]],
+                ["description", "Command requires updated intelligence on this area."],
+                ["targetPos", _intel get "pos"],
+                ["priority", 500],
+                ["source", "intel_gap"]
+            ]];
+        };
+    } forEach ATLAS_intelRegistry;
+
+    // 2. Base supply low → Supply run mission
+    {
+        private _base = _y;
+        private _supplies = _base get "supplies";
+        {
+            if ((_supplies get _x) < 25) then {
+                _missions pushBack [createHashMapFromArray [
+                    ["type", "SUPPLY_RUN"],
+                    ["title", format ["Resupply %1 - %2", _base get "name", _x]],
+                    ["description", format ["%1 at %2 is critically low. Deliver supplies from %3.",
+                        _x, _base get "name", /* parent base name */]],
+                    ["targetBase", _base get "id"],
+                    ["resource", _x],
+                    ["priority", 800],
+                    ["source", "base_supply"]
+                ]];
+            };
+        } forEach ["ammo", "fuel", "food", "water", "medical"];
+    } forEach ATLAS_baseRegistry;
+
+    // 3. Frontline sector uncovered → Patrol mission
+    // 4. OPCOM wants attack → Assault mission for player squad
+    // 5. Civilian CASEVAC → Medical evacuation mission
+    // 6. Base construction → Engineering mission
+    // 7. Convoy escort → Escort mission
+    // 8. OP establishment → Observation post setup
+
+    _missions
+};
+```
+
+#### 20.5.2 Mission Types
+
+| Mission Type | Trigger | Objective | Completion |
+|-------------|---------|-----------|------------|
+| **Patrol** | Frontline sector uncovered | Walk route, report contacts | Return to base after route |
+| **Recon** | Intel gap or stale intel | Observe area, report findings | Intel submitted via SPOTREP |
+| **Assault** | OPCOM attack order | Take objective | Objective captured |
+| **Defend** | Objective under threat | Hold position for duration | Timer expires or threat eliminated |
+| **Supply Run** | Base supply critical | Deliver supplies from A to B | Supplies delivered |
+| **CASEVAC** | Civilian medical emergency | Extract civilian to medical facility | Civilian delivered |
+| **Convoy Escort** | Logistics convoy dispatched | Escort convoy safely to destination | Convoy arrives |
+| **Establish OP** | OPCOM needs overwatch | Move to position, set up OP | OP established and manned |
+| **Establish PB** | OPCOM needs forward presence | Move to area, set up patrol base | PB established |
+| **QRF** | Friendly base under attack | Rapid deploy to base, engage enemy | Threat neutralized |
+| **Hearts & Minds** | Civilian needs in area | Deliver aid, treat injured, engage population | Hostility reduced |
+| **IED Clearance** | IED detected or suspected | Clear route of IEDs | Route declared clear |
+
+#### 20.5.3 Mission Presentation
+
+Missions appear in the C2 tablet with priority ranking. Players can:
+- View available missions (sorted by priority/proximity)
+- Accept a mission (assigned to their squad)
+- Report progress (via SPOTREP/SITREP)
+- Complete/fail the mission (system detects automatically where possible)
+
+---
+
+### 20.6 Recon & Intelligence Pipeline
+
+#### 20.6.1 Player Observation → Intel
+
+When players observe enemy forces, those observations should feed into the commander's intel picture:
+
+```sqf
+// Player spots enemy → creates SPOTREP → intel entry created
+// Flow:
+// 1. Player uses C2 tablet SPOTREP: selects grid, enemy type, size, activity
+// 2. atlas_c2 fires: ["atlas_c2_reportSubmitted", [reportHashMap]]
+// 3. atlas_opcom handler creates intel entry with high confidence
+// 4. OPCOM factors new intel into next planning cycle
+
+// Automatic detection (optional):
+// When spawned enemy is in player's line of sight for >5 seconds
+// → system prompts "Enemy spotted. Submit SPOTREP?" or auto-generates contact report
+
+// Intel from AI profiles:
+// When a friendly spawned patrol makes contact with enemy
+// → auto-generate intel entry from the contact report
+["atlas_profile_contact", {
+    params ["_friendlyProfileId", "_enemyProfileId", "_pos"];
+    private _enemy = ATLAS_profileRegistry get _enemyProfileId;
+    [createHashMapFromArray [
+        ["type", "contact"],
+        ["pos", _pos],
+        ["side", _enemy get "side"],
+        ["source", "patrol"],
+        ["confidence", 0.9],
+        ["size", [_enemy] call ATLAS_fnc_profile_estimateSize],
+        ["reportedBy", _friendlyProfileId],
+        ["reportedAt", serverTime]
+    ]] call ATLAS_fnc_intel_create;
+}] call CBA_fnc_addEventHandler;
+```
+
+#### 20.6.2 Intel Decay
+
+Intel confidence degrades over time. Enemy forces move; old data becomes unreliable.
+
+```sqf
+// PFH: decay intel confidence every 60 seconds
+{
+    private _intel = _y;
+    private _age = serverTime - (_intel get "reportedAt");
+    private _decayRate = _intel get "_decayRate";  // per minute
+    private _newConf = (_intel get "confidence") - (_decayRate * (_age / 60));
+
+    if (_newConf <= 0) then {
+        // Intel expired — remove
+        ATLAS_intelRegistry deleteAt _x;
+    } else {
+        _intel set ["confidence", _newConf max 0];
+    };
+} forEach ATLAS_intelRegistry;
+```
+
+#### 20.6.3 Intel Verification
+
+When two independent sources report the same area, confidence is boosted:
+
+```sqf
+// When new intel is created, check for corroborating reports nearby
+ATLAS_fnc_intel_checkCorroboration = {
+    params ["_newIntel"];
+    {
+        private _existing = _y;
+        if (_existing get "pos" distance (_newIntel get "pos") < 500) then {
+            if (_existing get "side" == _newIntel get "side") then {
+                // Corroborated! Boost both
+                _existing set ["confidence", (_existing get "confidence" + 0.3) min 1.0];
+                _existing set ["verified", true];
+                _newIntel set ["confidence", (_newIntel get "confidence" + 0.2) min 1.0];
+                _newIntel set ["verified", true];
+            };
+        };
+    } forEach ATLAS_intelRegistry;
+};
+```
+
+---
+
+### 20.7 Hearts & Minds System
+
+#### 20.7.1 Civilian Needs
+
+Civilians in ATLAS have needs beyond just existing. Areas have **stability scores** that affect civilian behavior and hostility:
+
+```sqf
+// Area stability HashMap (per grid cell)
+ATLAS_stabilityMap = createHashMap;  // cellKey -> stability HashMap
+{
+    "security": number (-100..100),     // military presence, patrols, crime
+    "governance": number (-100..100),   // rule of law, infrastructure
+    "development": number (-100..100),  // economic activity, aid delivery
+    "overall": number (-100..100)       // weighted average
+}
+
+// Stability factors:
+// POSITIVE: friendly patrols, aid delivery, medical care, no combat damage,
+//           infrastructure intact, low crime, civilian interaction
+// NEGATIVE: combat in area, civilian casualties, IEDs, no patrols,
+//           damaged infrastructure, no supplies, intimidation
+```
+
+#### 20.7.2 Humanitarian Encounters
+
+Random civilian encounters spawn near players in unstable areas:
+
+```sqf
+// Encounter types
+ATLAS_civEncounters = [
+    ["injured_civilian", {
+        // Civilian with injuries — needs medical treatment or CASEVAC
+        // Player can: treat on-site (ACE medical), call CASEVAC, ignore
+        // Effect: treating = +stability, ignoring = -stability
+    }],
+    ["sick_civilians", {
+        // Multiple civilians at location need medicine
+        // Requires: medical supplies delivered from base
+        // Effect: +stability, +trust, reduces hostility
+    }],
+    ["hungry_population", {
+        // Area needs food/water delivery
+        // Requires: supply run from base with food/water
+        // Effect: +stability, +hearts_and_minds score
+    }],
+    ["damaged_infrastructure", {
+        // Road/bridge/building damaged by combat
+        // Requires: construction supplies + time
+        // Effect: +governance, +development, enables logistics routes
+    }],
+    ["civilian_tip", {
+        // Friendly civilian offers intel about enemy activity
+        // Requires: adequate stability in area (civs must trust you)
+        // Effect: +intel, reveals insurgent cells or IED locations
+    }],
+    ["intimidation", {
+        // Insurgents intimidating civilian population
+        // Requires: patrol to disperse, or garrison to prevent
+        // Effect: if ignored, -stability, +hostility, +insurgent recruitment
+    }]
+];
+```
+
+#### 20.7.3 CASEVAC Mechanics
+
+```sqf
+// Civilian CASEVAC flow:
+// 1. Encounter spawns injured civilian (or combat creates civilian casualties)
+// 2. atlas_c2 generates CASEVAC mission
+// 3. Player stabilizes civilian (ACE medical if available)
+// 4. Player requests transport (atlas_c2 → atlas_air or ground transport)
+// 5. Transport arrives, civilian loaded
+// 6. Transport to nearest medical facility (MOB or FOB with medical supplies)
+// 7. On delivery: +stability, +hearts_and_minds, reduces hostility in area
+
+// Events
+"atlas_civ_casevacRequested"    // civilian needs medical evacuation
+"atlas_civ_casevacComplete"     // civilian delivered to medical facility
+"atlas_civ_aidDelivered"        // food/water/medicine delivered to area
+"atlas_civ_encounterSpawned"    // random encounter created near players
+"atlas_civ_encounterResolved"   // player dealt with encounter (positive or negative)
+```
+
+#### 20.7.4 Hearts & Minds Score
+
+Each area has a hearts & minds score that aggregates civilian sentiment:
+
+```sqf
+// Hearts & minds score drives:
+// - Civilian willingness to provide intel (higher = more tips)
+// - Insurgent recruitment rate (lower = more recruits for enemy)
+// - Civilian behavior (higher = friendly, lower = hostile/fleeing)
+// - Random encounter frequency (lower stability = more humanitarian needs)
+// - Victory conditions (some missions require H&M threshold to "win")
+```
+
+---
+
+### 20.8 Enhanced Supply Chain
+
+#### 20.8.1 Resource Types
+
+| Resource | Consumed By | Source | Critical Threshold |
+|----------|------------|--------|-------------------|
+| **Ammo** | Combat (proportional to engagement frequency) | MOB depot | <20% = reduced combat effectiveness |
+| **Fuel** | Vehicle movement, generators | MOB depot | <15% = vehicles immobilized |
+| **Food** | All personnel (constant rate) | MOB depot | <10% = morale penalty, attrition |
+| **Water** | All personnel (faster in hot weather) | MOB depot | <10% = severe morale/attrition |
+| **Medical** | Casualties (proportional to combat) | MOB depot | <15% = wounded cannot be treated |
+| **Construction** | Base building/repair | MOB depot | Only consumed on construction |
+
+#### 20.8.2 Supply Routes
+
+Supply routes follow the base hierarchy. Each route has:
+
+```sqf
+// Supply route HashMap
+{
+    "source": baseId,
+    "destination": baseId,
+    "route": Array<[x,y,z]>,    // road waypoints
+    "distance": number (meters),
+    "estimatedTime": number (seconds at convoy speed),
+    "threatLevel": "low"|"medium"|"high",   // based on enemy influence along route
+    "state": "open"|"contested"|"cut",       // based on enemy control of route segments
+    "lastConvoy": serverTime
+}
+
+// If route passes through enemy-influenced cells → threat level increases
+// If enemy controls cells along route → route is "contested" or "cut"
+// Cut routes require: clear enemy, establish patrol, or find alternate route
+```
+
+#### 20.8.3 Supply Chain Events
+
+```sqf
+"atlas_supply_routeOpened"       // new supply route established
+"atlas_supply_routeCut"          // enemy cut a supply route
+"atlas_supply_routeContested"    // route under threat
+"atlas_supply_delivered"         // supplies arrived at base
+"atlas_supply_convoyAmbushed"    // convoy attacked on route
+"atlas_supply_criticalShortage"  // base has critical supply shortage
+```
+
+---
+
+### 20.9 Multi-Session Operations
+
+#### 20.9.1 Session Persistence
+
+For multi-session campaigns (the Arma 2 MSO feel), ATLAS persists:
+
+| Data | Where | Survives Restart? |
+|------|-------|-------------------|
+| All profiles (positions, damage, ammo) | PNS + PostgreSQL | Yes |
+| Base hierarchy (FOB/COP/PB/OP states, supplies) | PNS + PostgreSQL | Yes |
+| Frontline / influence map | Recalculated from persistent data | Yes (derived) |
+| Intel registry | PNS (with decay applied on load) | Yes (degraded) |
+| Civilian hostility & stability | PNS + PostgreSQL | Yes |
+| Hearts & minds scores | PNS + PostgreSQL | Yes |
+| Player state (gear, position) | PNS + PostgreSQL | Yes |
+| Active tasks/missions | PNS | Yes |
+| OPCOM state (orders, phase, assessments) | PNS | Yes |
+| Weather | PNS | Yes |
+| Statistics | PNS + PostgreSQL | Yes |
+
+#### 20.9.2 Campaign Progression
+
+Over multiple sessions, the war evolves:
+- Territory changes hands as objectives are captured/lost
+- Base network grows or shrinks with the frontline
+- Supply lines extend or contract
+- Civilian areas stabilize or destabilize
+- Intel picture builds up or decays
+- Force strength depletes through casualties, reinforced through the pool
+- Hearts & minds in areas improves or degrades based on player actions
+- Insurgent cells grow or shrink based on civilian sentiment and counterinsurgency
+
+#### 20.9.3 Cross-Server Campaign
+
+With PostgreSQL persistence, multiple servers contribute to one campaign:
+- Server 1 (Altis) handles the main theater
+- Server 2 (Stratis) handles a secondary island
+- Losses on one map deplete the shared reinforcement pool
+- Capturing key objectives on one map unlocks reinforcements for the other
+- Player state roams — log off on Altis, log in on Stratis with same gear
+- Theater-level frontline shown across all maps in C2 tablet
+
+---
+
+### 20.10 New Functions Required
+
+These systems add functions to existing modules:
+
+**atlas_core additions:**
+```
+fn_buildRoadGraph.sqf            # Build A* road graph from map roads
+fn_pathfindRoad.sqf              # A* pathfinding on road graph
+fn_pathfindDirect.sqf            # Direct pathfinding with terrain avoidance
+fn_pathfindNaval.sqf             # Naval route pathfinding
+fn_pathfindAir.sqf               # Air direct pathfinding
+fn_frontlineCalculate.sqf        # Calculate influence map
+fn_frontlineExtract.sqf          # Extract frontline points from influence map
+fn_frontlineSortPoints.sqf       # Sort frontline into coherent line
+fn_influenceUpdate.sqf           # PFH: update influence map periodically
+```
+
+**atlas_profile additions:**
+```
+fn_virtualMoveSpeed.sqf          # Calculate speed based on type/terrain/road
+fn_convoyMove.sqf                # Coordinated multi-profile movement
+fn_estimateSize.sqf              # Estimate unit size label from profile data
+fn_contactDetect.sqf             # Detect when virtual profiles "encounter" each other
+```
+
+**atlas_opcom additions:**
+```
+fn_assessIntel.sqf               # Factor intel picture into assessment
+fn_requestRecon.sqf              # Generate recon request for area with stale intel
+fn_manageBases.sqf               # Evaluate base network, request establishment/abandonment
+fn_assessSupplyRoutes.sqf        # Check supply route viability
+fn_generateTacticalOrder.sqf     # Generate nuanced orders (QRF, screen, establish base)
+fn_checkForceReadiness.sqf       # Verify forces have supply before ordering attack
+```
+
+**atlas_logistics additions:**
+```
+fn_baseSupplyConsume.sqf         # PFH: consume supplies at bases
+fn_baseSupplyRequest.sqf         # Generate resupply request for base
+fn_supplyRouteCalculate.sqf      # Calculate route from source to destination base
+fn_supplyRouteThreatAssess.sqf   # Assess threat level along route
+fn_supplyRouteMonitor.sqf        # PFH: check if routes are cut
+fn_resourceCreate.sqf            # Create resource crate object for player transport
+```
+
+**atlas_civilian additions:**
+```
+fn_stabilityUpdate.sqf           # Update area stability scores
+fn_stabilityGet.sqf              # Get stability for a grid cell
+fn_encounterSpawn.sqf            # Spawn random civilian encounter near players
+fn_encounterResolve.sqf          # Process encounter outcome (positive/negative)
+fn_casevacRequest.sqf            # Generate CASEVAC mission
+fn_casevacComplete.sqf           # Process completed CASEVAC
+fn_aidDeliver.sqf                # Process aid delivery to area
+fn_heartsMindsScore.sqf          # Calculate hearts & minds score for area
+```
+
+**atlas_c2 additions:**
+```
+fn_generateMissions.sqf          # Generate contextual missions from simulation state
+fn_missionPrioritize.sqf         # Sort missions by priority and proximity to players
+fn_missionAccept.sqf             # Player accepts mission
+fn_missionCheckComplete.sqf      # Auto-detect mission completion
+fn_tabletMapDrawFrontline.sqf    # Draw frontline on map control
+fn_tabletMapDrawInfluence.sqf    # Draw influence heatmap
+fn_tabletMapDrawBases.sqf        # Draw base hierarchy on map
+fn_tabletMapDrawSupplyRoutes.sqf # Draw supply routes on map
+fn_tabletPanelIntel.sqf          # Intel overview panel
+fn_tabletPanelMissions.sqf       # Available missions panel
+fn_tabletPanelBases.sqf          # Base status panel (supply levels)
+fn_spotrepAutoDetect.sqf         # Auto-detect enemy in player LOS → prompt SPOTREP
+```
+
+**atlas_persist additions:**
+```
+fn_baseSave.sqf                  # Save base registry
+fn_baseLoad.sqf                  # Load base registry
+fn_intelSave.sqf                 # Save intel registry (with decay pre-applied)
+fn_intelLoad.sqf                 # Load intel registry
+fn_stabilitySave.sqf             # Save stability map
+fn_stabilityLoad.sqf             # Load stability map
 ```
 
 ---
