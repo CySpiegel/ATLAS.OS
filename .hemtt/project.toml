@@ -16,7 +16,11 @@ include = [
 ]
 exclude = [
     "*.psd",
-    "*.png",
     "*.tga",
     "docs/**",
+    "tools/**",
 ]
+
+# HEMTT will convert PNG to PAA during build
+[asc]
+enabled = true

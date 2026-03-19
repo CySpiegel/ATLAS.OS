@@ -1,0 +1,21 @@
+# HEMTT build output
+.hemttout/
+*.biprivatekey
+
+# Arma 3 generated files
+*.paa
+*.ebo
+*.bisign
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+*.code-workspace
+
+# Python
+__pycache__/
+*.pyc
+.venv/

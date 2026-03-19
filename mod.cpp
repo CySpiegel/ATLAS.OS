@@ -1,0 +1,13 @@
+name = "ATLAS.OS";
+picture = "logo_ca.paa";
+logo = "logo_ca.paa";
+logoOver = "logo_co.paa";
+logoSmall = "logo_co.paa";
+tooltip = "ATLAS.OS";
+tooltipOwned = "ATLAS.OS - Advanced Tactical Lifecycle & Asymmetric Simulation";
+overview = "A ground-up redesign of the ALiVE military simulation framework for Arma 3. Native HashMaps, event-driven architecture, spatial grid indexing.";
+author = "ATLAS.OS Team";
+overviewPicture = "logo_ca.paa";
+overviewText = "ATLAS.OS provides persistent military operations with AI commanders, virtual profiles, logistics, and full battlefield simulation — rebuilt for modern Arma 3 performance.";
+action = "https://github.com/CySpiegel/ATLAS.OS";
+actionName = "GitHub";
