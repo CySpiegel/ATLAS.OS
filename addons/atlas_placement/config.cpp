@@ -42,10 +42,10 @@ class CfgVehicles {
     class ATLAS_Module_Placement : Module_F {
         scope = 2;
         displayName = "Military Placement";
-        icon = "\z\atlas\addons\atlas_placement\ui\icon.png";
+        icon = "";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Military";
-        function = "ATLAS_fnc_placement_moduleInit";
+        function = "atlas_placement_fnc_moduleInit";
         functionPriority = 2;
         isGlobal = 1;
         isTriggerActivated = 0;

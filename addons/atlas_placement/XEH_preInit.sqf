@@ -1,9 +1,18 @@
-// ============================================================================
-// ATLAS.OS Military Placement — Pre-Initialization
-// ============================================================================
 #include "script_component.hpp"
 
-LOG("Pre-initialization starting...");
+LOG("PreInit starting");
+
+// Compile all functions
+PREP(moduleInit);
+PREP(init);
+PREP(processModule);
+PREP(readObjectivesFromEditor);
+PREP(determineForceComposition);
+PREP(getClassnames);
+PREP(createForcesForObjective);
+PREP(placeInfantry);
+PREP(placeArmor);
+PREP(getFactionsForSide);
 
 // Register module
 [
@@ -13,8 +22,7 @@ LOG("Pre-initialization starting...");
         ["requires", ["main", "profile"]],
         ["provides", ["militaryPlacement", "forceGeneration"]],
         ["events", [
-            "ATLAS_placement_complete",
-            "ATLAS_placement_groupSpawned"
+            "ATLAS_placement_complete"
         ]]
     ]
 ] call EFUNC(main,registerModule);
@@ -22,4 +30,4 @@ LOG("Pre-initialization starting...");
 // Placement instance registry
 GVAR(instances) = [];
 
-LOG("Pre-initialization complete.");
+LOG("PreInit complete");
