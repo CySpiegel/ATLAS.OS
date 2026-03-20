@@ -67,7 +67,7 @@ class CfgVehicles {
         displayName = "ATLAS - Required";
         icon = "\a3\Modules_F\data\iconModule_ca.paa";
         picture = "\a3\Modules_F\data\iconModule_ca.paa";
-        function = "atlas_main_fnc_init";
+        function = "atlas_main_fnc_moduleInit";
         functionPriority = 0;
 
         class Attributes : AttributesBase {

@@ -2,6 +2,7 @@
 
 // Compile all functions
 PREP(init);
+PREP(moduleInit);
 PREP(log);
 PREP(gridInsert);
 PREP(gridRemove);
@@ -18,6 +19,17 @@ PREP(deserialize);
 PREP(validateProfile);
 
 LOG("PreInit starting");
+
+// Self-register main module FIRST (other modules check for "main" in their deps)
+[
+    "main",
+    createHashMapFromArray [
+        ["version", "0.1.0"],
+        ["requires", []],
+        ["provides", ["registries", "spatialGrid", "eventBus", "moduleLoader"]],
+        ["events", ["ATLAS_core_initialized", "ATLAS_module_registered", "ATLAS_player_areaChanged"]]
+    ]
+] call FUNC(registerModule);
 
 // Core Registries
 GVAR(profileRegistry)   = createHashMap;

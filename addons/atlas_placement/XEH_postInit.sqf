@@ -10,7 +10,7 @@ if (isServer) then {
     [{
         if (count GVAR(instances) > 0) then {
             {
-                [_x] call FUNC(init);
+                [_x] spawn FUNC(init);
             } forEach GVAR(instances);
             GVAR(instances) = [];
             LOG("All placement requests processed.");

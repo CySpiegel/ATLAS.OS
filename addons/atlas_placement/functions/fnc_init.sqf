@@ -2,14 +2,14 @@
 // ============================================================================
 // atlas_placement_fnc_init
 // ============================================================================
-// Processes a single placement instance. Reads objectives from synced entities
-// or generates them from nearby locations, then creates profiles.
+// Processes a single placement instance. Reads objectives, creates profiles.
+// Uses scheduled environment to spread profile creation across frames.
 //
 // @param  _cfg  HASHMAP  Placement config from moduleInit
 //
 // @return Nothing
 // @context Server only
-// @scheduled false
+// @scheduled true (spawned)
 // ============================================================================
 
 params ["_cfg"];
@@ -25,17 +25,15 @@ private _objectivesOnly = _cfg getOrDefault ["objectivesOnly", false];
 
 LOG_2("Processing placement: %1 %2", _faction, _size);
 
-// Determine objectives — from synced entities or auto-detect nearby locations
+// Determine objectives
 private _objectives = [];
 
-// Check for synced objective modules
 {
     if (typeOf _x isEqualTo "ATLAS_Module_Objective") then {
         _objectives pushBack (getPosATL _x);
     };
 } forEach _synced;
 
-// If no synced objectives, auto-detect from nearby named locations
 if (_objectives isEqualTo []) then {
     _objectives = [_pos, _size] call FUNC(readObjectivesFromEditor);
 };
@@ -46,7 +44,7 @@ if (_objectives isEqualTo []) exitWith {
 
 LOG_1("Found %1 objectives for placement", count _objectives);
 
-// Register objectives in the objective registry
+// Register objectives
 {
     private _objID = ["OBJ"] call EFUNC(main,nextID);
     private _objective = createHashMapFromArray [
@@ -63,22 +61,29 @@ LOG_1("Found %1 objectives for placement", count _objectives);
     EGVAR(main,objectiveRegistry) set [_objID, _objective];
 } forEach _objectives;
 
-// Create forces distributed across objectives
+// Determine total groups to create
 private _groupCount = [_size] call FUNC(determineForceComposition);
+private _groupsPerObj = ceil (_groupCount / (count _objectives));
+
+LOG_1("Creating %1 groups (spread across frames)", _groupCount);
+
+// Spread creation across frames using scheduled environment
 private _profileIDs = [];
+private _created = 0;
 
 {
     private _objPos = _x;
-    private _groupsForObj = ceil (_groupCount / (count _objectives));
 
-    for "_i" from 1 to _groupsForObj do {
+    for "_i" from 1 to _groupsPerObj do {
+        if (_created >= _groupCount) exitWith {};
+
         private _spawnPos = _objPos vectorAdd [
             -200 + random 400,
             -200 + random 400,
             0
         ];
 
-        private _type = selectRandom ["infantry", "infantry", "infantry", "motorized"];
+        private _type = selectRandomWeighted ["infantry", 0.6, "motorized", 0.25, "mechanized", 0.1, "armor", 0.05];
         private _classnames = [_type, _faction, _side] call FUNC(getClassnames);
 
         if !(_classnames isEqualTo []) then {
@@ -105,6 +110,13 @@ private _profileIDs = [];
                     (_obj get "garrison") pushBack _pid;
                 };
             };
+        };
+
+        _created = _created + 1;
+
+        // Yield every 5 profiles to prevent frame hitch
+        if (_created % 5 == 0) then {
+            sleep 0.01;
         };
     };
 } forEach _objectives;

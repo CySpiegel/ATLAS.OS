@@ -2,20 +2,20 @@
 // ============================================================================
 // atlas_placement_fnc_moduleInit
 // ============================================================================
-// Called by the engine when an ATLAS_Module_Placement is activated in Eden.
+// Called by the engine when an ATLAS_Module_Placement is activated.
 // Reads module attributes, builds a config HashMap, queues for processing.
-//
-// @param  _logic      OBJECT  The module logic object
-// @param  _units      ARRAY   Synced units (unused)
-// @param  _activated  BOOL    Whether the module is activated
 //
 // @return Nothing
 // @context Server only
 // @scheduled false
 // ============================================================================
 
-params ["_logic", "_units", "_activated"];
+// Module_F passes [logic, units, activated] but may vary by context
+private _logic = param [0, objNull, [objNull]];
+private _units = param [1, [], [[]]];
+private _activated = param [2, true, [true]];
 
+if (isNull _logic) exitWith {};
 if (!_activated) exitWith {};
 if (!isServer) exitWith {};
 
