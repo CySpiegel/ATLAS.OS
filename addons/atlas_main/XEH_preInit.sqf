@@ -13,6 +13,9 @@ PREP(arrayToHash);
 PREP(nextID);
 PREP(registerModule);
 PREP(setting);
+PREP(serialize);
+PREP(deserialize);
+PREP(validateProfile);
 
 LOG("PreInit starting");
 
@@ -22,9 +25,13 @@ GVAR(objectiveRegistry) = createHashMap;
 GVAR(civilianRegistry)  = createHashMap;
 GVAR(moduleRegistry)    = createHashMap;
 GVAR(spatialGrid)       = createHashMap;
+GVAR(baseRegistry)      = createHashMap;
+GVAR(hcRegistry)        = createHashMap;
+GVAR(intelRegistry)     = createHashMap;
 GVAR(profileCounter)    = 0;
 GVAR(initialized)       = createHashMap;
 GVAR(version)           = "0.1.0";
+GVAR(gridSize)          = ATLAS_GRID_SIZE_DEFAULT;
 
 // CBA Settings — Core
 [
@@ -54,7 +61,10 @@ GVAR(version)           = "0.1.0";
     ["ATLAS.OS", "Core"],
     [100, 1000, 500, 0],
     1,
-    {},
+    {
+        params ["_value"];
+        GVAR(gridSize) = _value;
+    },
     true
 ] call CBA_fnc_addSetting;
 
