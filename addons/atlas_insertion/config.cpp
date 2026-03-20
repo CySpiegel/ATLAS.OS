@@ -3,20 +3,26 @@
 class CfgPatches {
     class atlas_insertion {
         name = "ATLAS.OS - Insertion / Multispawn";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {"ATLAS_Module_Insertion"};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_insertion {
+        tag = "atlas_insertion";
+        class insertion {
+            file = "\z\atlas\addons\atlas_insertion\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"
 
 class CfgVehicles {
     class Logic;
@@ -36,7 +42,7 @@ class CfgVehicles {
     class ATLAS_Module_Insertion : Module_F {
         scope = 2;
         displayName = "Insertion / Multispawn";
-        icon = "\z\atlas\addons\atlas_insertion\ui\icon_insertion_ca.paa";
+        icon = "\z\atlas\addons\atlas_insertion\ui\icon.png";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Support";
         function = "ATLAS_fnc_insertion_moduleInit";

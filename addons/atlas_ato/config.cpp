@@ -3,20 +3,26 @@
 class CfgPatches {
     class atlas_ato {
         name = "ATLAS.OS - Air Tasking Order (ATO)";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {"ATLAS_Module_ATO"};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main", "atlas_profile"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_ato {
+        tag = "atlas_ato";
+        class ato {
+            file = "\z\atlas\addons\atlas_ato\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"
 
 class CfgVehicles {
     class Logic;
@@ -36,7 +42,7 @@ class CfgVehicles {
     class ATLAS_Module_ATO : Module_F {
         scope = 2;
         displayName = "Air Tasking Order (ATO)";
-        icon = "\z\atlas\addons\atlas_ato\ui\icon_ato_ca.paa";
+        icon = "\z\atlas\addons\atlas_ato\ui\icon.png";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Military";
         function = "ATLAS_fnc_ato_moduleInit";

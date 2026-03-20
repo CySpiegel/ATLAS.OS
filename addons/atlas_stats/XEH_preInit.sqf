@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Stats] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -17,10 +17,10 @@ diag_log "[ATLAS::Stats] Pre-initialization starting...";
             "ATLAS_stats_saved"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Statistics store
-ATLAS_stats_data = createHashMap;
+GVAR(data) = createHashMap;
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Statistics
@@ -48,4 +48,4 @@ ATLAS_stats_data = createHashMap;
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::Stats] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

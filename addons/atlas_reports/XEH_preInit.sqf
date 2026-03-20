@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Reports] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -17,10 +17,10 @@ diag_log "[ATLAS::Reports] Pre-initialization starting...";
             "ATLAS_reports_sitrepGenerated"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Report log
-ATLAS_reports_log = [];
+GVAR(log) = [];
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Reporting
@@ -48,4 +48,4 @@ ATLAS_reports_log = [];
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::Reports] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

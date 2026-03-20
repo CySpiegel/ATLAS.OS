@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Compat] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -17,7 +17,7 @@ diag_log "[ATLAS::Compat] Pre-initialization starting...";
             "ATLAS_compat_warningIssued"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Compatibility
@@ -34,4 +34,4 @@ diag_log "[ATLAS::Compat] Pre-initialization starting...";
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::Compat] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

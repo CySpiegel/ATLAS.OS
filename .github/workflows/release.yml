@@ -5,51 +5,67 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   release:
-    name: Build & Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Setup HEMTT
-        uses: arma-actions/hemtt@v1
+      - name: Install HEMTT
+        run: |
+          curl -LSs "https://github.com/BrettMayson/HEMTT/releases/download/v1.18.2/linux-x64" -o hemtt
+          chmod +x hemtt
+          sudo mv hemtt /usr/local/bin/hemtt
 
-      - name: Run HEMTT check
-        run: hemtt check
+      - name: Restore signing key
+        if: env.HEMTT_PRIVATE_KEY != ''
+        run: echo "$HEMTT_PRIVATE_KEY" > .hemttprivatekey
+        env:
+          HEMTT_PRIVATE_KEY: ${{ secrets.HEMTT_PRIVATE_KEY }}
 
-      - name: Build release
+      - name: Build signed release
         run: hemtt release
 
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: atlas-os-${{ github.ref_name }}
-          path: .hemttout/release/
-          if-no-files-found: error
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release-assets
+          cp .hemttout/release/keys/*.bikey release-assets/ 2>/dev/null || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: .hemttout/release/*.zip
-          generate_release_notes: true
+          name: "ATLAS.OS v${{ steps.version.outputs.VERSION }}"
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-alpha') || contains(github.ref, '-beta') }}
+          generate_release_notes: true
+          files: |
+            release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   workshop:
-    name: Publish to Steam Workshop
     runs-on: ubuntu-latest
     needs: release
     if: ${{ !contains(github.ref_name, '-rc') && !contains(github.ref_name, '-alpha') && !contains(github.ref_name, '-beta') }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup HEMTT
-        uses: arma-actions/hemtt@v1
+      - name: Install HEMTT
+        run: |
+          curl -LSs "https://github.com/BrettMayson/HEMTT/releases/download/v1.18.2/linux-x64" -o hemtt
+          chmod +x hemtt
+          sudo mv hemtt /usr/local/bin/hemtt
 
       - name: Build release
         run: hemtt release
@@ -57,42 +73,25 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          # Get the previous tag
           PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | sed -n '2p')
           TAG="${{ github.ref_name }}"
-
           if [ -n "$PREV_TAG" ]; then
-            # Generate changelog from commit messages between tags
             NOTES=$(git log "${PREV_TAG}..${TAG}" --pretty=format:"- %s" --no-merges)
           else
-            # First release — use all commits
             NOTES=$(git log --pretty=format:"- %s" --no-merges)
           fi
-
-          # Also fetch the GitHub Release body (auto-generated release notes)
-          RELEASE_BODY=$(gh release view "$TAG" --json body -q '.body' 2>/dev/null || true)
-
-          if [ -n "$RELEASE_BODY" ]; then
-            CHANGELOG="$RELEASE_BODY"
-          else
-            CHANGELOG="$NOTES"
-          fi
-
-          # Write to output using delimiter for multiline support
           {
             echo "notes<<CHANGELOG_EOF"
-            echo "$CHANGELOG"
+            echo "$NOTES"
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ github.token }}
 
       - name: Upload to Steam Workshop
         uses: arma-actions/workshop-upload@v1
         with:
           appId: '107410'
           itemId: ${{ vars.STEAM_WORKSHOP_ID }}
-          contentPath: .hemttout/release/@ATLAS_OS
+          contentPath: .hemttout/release/
           changelog: ${{ steps.changelog.outputs.notes }}
         env:
           STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}

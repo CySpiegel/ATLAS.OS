@@ -3,17 +3,17 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Admin] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
     // Register admin event handlers
     ["ATLAS_admin_forceSave", {
-        [] call ATLAS_fnc_admin_forceSave;
+        [] call FUNC(forceSave);
     }] call CBA_fnc_addEventHandler;
 
     ["ATLAS_admin_resetState", {
         params ["_scope"];
-        [_scope] call ATLAS_fnc_admin_resetState;
+        [_scope] call FUNC(resetState);
     }] call CBA_fnc_addEventHandler;
 };
 
@@ -22,11 +22,11 @@ if (hasInterface) then {
     ["ATLAS.OS", "openAdminPanel", ["Open Admin Panel", "Opens the ATLAS.OS admin control panel for server administrators."],
     {
         if (serverCommandAvailable "#kick") then {
-            [] call ATLAS_fnc_admin_openPanel;
+            [] call FUNC(openPanel);
         } else {
             hint "ATLAS: Admin access required.";
         };
     }, "", [0, [false, false, false]]] call CBA_fnc_addKeybind;
 };
 
-diag_log "[ATLAS::Admin] Post-initialization complete.";
+LOG("Post-initialization complete.");

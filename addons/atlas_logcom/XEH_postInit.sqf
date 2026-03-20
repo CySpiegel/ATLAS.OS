@@ -3,33 +3,33 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::LogCom] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
-    [] call ATLAS_fnc_logcom_init;
+    [] call FUNC(init);
 
     // Monitor group ammo levels for resupply
     [{
         {
             private _profileID = _x;
-            private _profile = ATLAS_profileRegistry get _profileID;
+            private _profile = EGVAR(profile,registry) get _profileID;
             if (!isNil "_profile") then {
                 private _ammoLevel = _profile getOrDefault ["ammoLevel", 1.0];
                 if (_ammoLevel < ATLAS_logcom_resupplyThreshold) then {
-                    [_profileID] call ATLAS_fnc_logcom_resupply;
+                    [_profileID] call FUNC(resupply);
                 };
             };
-        } forEach (keys ATLAS_profileRegistry);
+        } forEach (keys EGVAR(profile,registry));
     }, 60] call CBA_fnc_addPerFrameHandler;
 
     // Convoy management cycle
     [{
         {
-            [_x] call ATLAS_fnc_logcom_convoy;
-        } forEach ATLAS_logcom_convoys;
+            [_x] call FUNC(convoy);
+        } forEach GVAR(convoys);
     }, 10] call CBA_fnc_addPerFrameHandler;
 
-    diag_log "[ATLAS::LogCom] Server-side logistics handler started.";
+    LOG("Server-side logistics handler started.");
 };
 
-diag_log "[ATLAS::LogCom] Post-initialization complete.";
+LOG("Post-initialization complete.");

@@ -3,17 +3,23 @@
 class CfgPatches {
     class atlas_compat {
         name = "ATLAS.OS - Compatibility Layer";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_compat {
+        tag = "atlas_compat";
+        class compat {
+            file = "\z\atlas\addons\atlas_compat\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"

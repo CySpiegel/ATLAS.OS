@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Markers] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -16,10 +16,10 @@ diag_log "[ATLAS::Markers] Pre-initialization starting...";
             "ATLAS_markers_updated"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Marker registry
-ATLAS_markers_registry = createHashMap;
+GVAR(registry) = createHashMap;
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Map Markers
@@ -58,4 +58,4 @@ ATLAS_markers_registry = createHashMap;
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::Markers] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

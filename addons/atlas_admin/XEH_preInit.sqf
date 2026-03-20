@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Admin] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -17,7 +17,7 @@ diag_log "[ATLAS::Admin] Pre-initialization starting...";
             "ATLAS_admin_stateReset"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Admin Actions
@@ -26,4 +26,4 @@ diag_log "[ATLAS::Admin] Pre-initialization starting...";
 // Admin Panel Keybind (registered as CBA keybind, not a setting)
 // Keybind is registered in postInit since it needs hasInterface
 
-diag_log "[ATLAS::Admin] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

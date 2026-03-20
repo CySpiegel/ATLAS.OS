@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::LogCom] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -18,10 +18,10 @@ diag_log "[ATLAS::LogCom] Pre-initialization starting...";
             "ATLAS_logcom_reinforcementDispatched"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Active convoys
-ATLAS_logcom_convoys = [];
+GVAR(convoys) = [];
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Logistics Command
@@ -60,4 +60,4 @@ ATLAS_logcom_convoys = [];
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::LogCom] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

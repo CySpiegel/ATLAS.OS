@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::GC] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -16,11 +16,11 @@ diag_log "[ATLAS::GC] Pre-initialization starting...";
             "ATLAS_gc_collected"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Cleanup queues
-ATLAS_gc_corpseQueue = [];
-ATLAS_gc_vehicleQueue = [];
+GVAR(corpseQueue) = [];
+GVAR(vehicleQueue) = [];
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Garbage Collection
@@ -59,4 +59,4 @@ ATLAS_gc_vehicleQueue = [];
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::GC] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

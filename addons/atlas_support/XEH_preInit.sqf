@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Support] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -19,9 +19,9 @@ diag_log "[ATLAS::Support] Pre-initialization starting...";
             "ATLAS_support_denied"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Support asset registry
-ATLAS_support_assets = [];
+GVAR(assets) = [];
 
-diag_log "[ATLAS::Support] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

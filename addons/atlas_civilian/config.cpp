@@ -3,20 +3,26 @@
 class CfgPatches {
     class atlas_civilian {
         name = "ATLAS.OS - Civilian Population";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {"ATLAS_Module_Civilian"};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main", "atlas_profile"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_civilian {
+        tag = "atlas_civilian";
+        class civilian {
+            file = "\z\atlas\addons\atlas_civilian\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"
 
 class CfgVehicles {
     class Logic;
@@ -36,7 +42,7 @@ class CfgVehicles {
     class ATLAS_Module_Civilian : Module_F {
         scope = 2;
         displayName = "Civilian Population";
-        icon = "\z\atlas\addons\atlas_civilian\ui\icon_civilian_ca.paa";
+        icon = "\z\atlas\addons\atlas_civilian\ui\icon.png";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Civilian";
         function = "ATLAS_fnc_civilian_moduleInit";

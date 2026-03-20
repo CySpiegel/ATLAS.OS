@@ -3,29 +3,29 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Stats] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
     if (ATLAS_stats_enabled) then {
-        [] call ATLAS_fnc_stats_init;
+        [] call FUNC(init);
 
         // Track kill events
         addMissionEventHandler ["EntityKilled", {
             params ["_unit", "_killer", "_instigator"];
-            ["kill", [_unit, _killer, _instigator]] call ATLAS_fnc_stats_track;
+            ["kill", [_unit, _killer, _instigator]] call FUNC(track);
         }];
 
         // Periodic stat save
         [{
             if (ATLAS_stats_enabled) then {
-                [] call ATLAS_fnc_stats_save;
+                [] call FUNC(save);
             };
         }, ATLAS_stats_saveInterval] call CBA_fnc_addPerFrameHandler;
 
-        diag_log "[ATLAS::Stats] Server-side stat tracking active.";
+        LOG("Server-side stat tracking active.");
     } else {
-        diag_log "[ATLAS::Stats] Stat tracking disabled via settings.";
+        LOG("Stat tracking disabled via settings.");
     };
 };
 
-diag_log "[ATLAS::Stats] Post-initialization complete.";
+LOG("Post-initialization complete.");

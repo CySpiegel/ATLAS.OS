@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Profile] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -20,7 +20,7 @@ diag_log "[ATLAS::Profile] Pre-initialization starting...";
             "ATLAS_profile_updated"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Profile Handler
@@ -48,4 +48,4 @@ diag_log "[ATLAS::Profile] Pre-initialization starting...";
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::Profile] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Weather] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -16,7 +16,7 @@ diag_log "[ATLAS::Weather] Pre-initialization starting...";
             "ATLAS_weather_changed"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Weather System
@@ -55,4 +55,4 @@ diag_log "[ATLAS::Weather] Pre-initialization starting...";
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::Weather] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

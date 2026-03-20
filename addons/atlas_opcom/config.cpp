@@ -3,20 +3,26 @@
 class CfgPatches {
     class atlas_opcom {
         name = "ATLAS.OS - AI Commander (OPCOM)";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {"ATLAS_Module_OPCOM"};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main", "atlas_profile", "atlas_placement"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_opcom {
+        tag = "atlas_opcom";
+        class opcom {
+            file = "\z\atlas\addons\atlas_opcom\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"
 
 class CfgVehicles {
     class Logic;
@@ -36,7 +42,7 @@ class CfgVehicles {
     class ATLAS_Module_OPCOM : Module_F {
         scope = 2;
         displayName = "AI Commander (OPCOM)";
-        icon = "\z\atlas\addons\atlas_opcom\ui\icon_opcom_ca.paa";
+        icon = "\z\atlas\addons\atlas_opcom\ui\icon.png";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Military";
         function = "ATLAS_fnc_opcom_moduleInit";

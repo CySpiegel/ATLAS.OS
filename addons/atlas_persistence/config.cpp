@@ -3,20 +3,26 @@
 class CfgPatches {
     class atlas_persistence {
         name = "ATLAS.OS - Persistence";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {"ATLAS_Module_Persistence"};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main", "atlas_profile"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_persistence {
+        tag = "atlas_persistence";
+        class persistence {
+            file = "\z\atlas\addons\atlas_persistence\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"
 
 class CfgVehicles {
     class Logic;
@@ -36,7 +42,7 @@ class CfgVehicles {
     class ATLAS_Module_Persistence : Module_F {
         scope = 2;
         displayName = "Persistence";
-        icon = "\z\atlas\addons\atlas_persistence\ui\icon_persistence_ca.paa";
+        icon = "\z\atlas\addons\atlas_persistence\ui\icon.png";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Core";
         function = "ATLAS_fnc_persistence_moduleInit";

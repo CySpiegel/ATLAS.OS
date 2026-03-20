@@ -3,14 +3,14 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Weather] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
-    [] call ATLAS_fnc_weather_init;
+    [] call FUNC(init);
 
     // Weather update cycle
     [{
-        [] call ATLAS_fnc_weather_update;
+        [] call FUNC(update);
     }, 60] call CBA_fnc_addPerFrameHandler;
 
     // Sync weather to JIP players
@@ -18,12 +18,12 @@ if (isServer) then {
         ["ATLAS_player_connected", {
             params ["_uid", "_name", "_jip", "_owner"];
             if (_jip) then {
-                [_owner] call ATLAS_fnc_weather_sync;
+                [_owner] call FUNC(sync);
             };
         }] call CBA_fnc_addEventHandler;
     };
 
-    diag_log "[ATLAS::Weather] Server-side weather handler started (60s cycle).";
+    LOG("Server-side weather handler started (60s cycle).");
 };
 
-diag_log "[ATLAS::Weather] Post-initialization complete.";
+LOG("Post-initialization complete.");

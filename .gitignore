@@ -1,6 +1,7 @@
 # HEMTT build output
 .hemttout/
 *.biprivatekey
+.hemttprivatekey
 
 # Arma 3 generated files
 *.paa

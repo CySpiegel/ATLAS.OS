@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Cargo] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -19,7 +19,7 @@ diag_log "[ATLAS::Cargo] Pre-initialization starting...";
             "ATLAS_cargo_slingDetached"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Cargo System
@@ -47,4 +47,4 @@ diag_log "[ATLAS::Cargo] Pre-initialization starting...";
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::Cargo] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

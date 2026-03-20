@@ -3,10 +3,10 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Reports] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
-    [] call ATLAS_fnc_reports_init;
+    [] call FUNC(init);
 
     // Auto SPOTREP on contact
     if (ATLAS_reports_autoSpotrep) then {
@@ -18,10 +18,10 @@ if (isServer) then {
 
     // Periodic SITREP generation
     [{
-        [] call ATLAS_fnc_reports_sitrep;
+        [] call FUNC(sitrep);
     }, ATLAS_reports_sitrepInterval] call CBA_fnc_addPerFrameHandler;
 
-    diag_log "[ATLAS::Reports] Server-side report handlers registered.";
+    LOG("Server-side report handlers registered.");
 };
 
-diag_log "[ATLAS::Reports] Post-initialization complete.";
+LOG("Post-initialization complete.");

@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::ATO] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
     // ATO mission handler — manages active air missions
@@ -11,12 +11,12 @@ if (isServer) then {
         {
             private _ato = _y;
             if (_ato getOrDefault ["active", false]) then {
-                [_ato] call ATLAS_fnc_ato_handler;
+                [_ato] call FUNC(handler);
             };
-        } forEach ATLAS_ato_instances;
+        } forEach GVAR(instances);
     }, 15] call CBA_fnc_addPerFrameHandler;
 
-    diag_log "[ATLAS::ATO] Server-side mission handler started (15s cycle).";
+    LOG("Server-side mission handler started (15s cycle).");
 };
 
-diag_log "[ATLAS::ATO] Post-initialization complete.";
+LOG("Post-initialization complete.");

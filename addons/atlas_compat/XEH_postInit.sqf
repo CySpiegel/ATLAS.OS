@@ -3,15 +3,15 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Compat] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
-    [] call ATLAS_fnc_compat_init;
+    [] call FUNC(init);
 
     // Run compatibility checks
-    [] call ATLAS_fnc_compat_check;
+    [] call FUNC(check);
 
-    diag_log "[ATLAS::Compat] Compatibility checks complete.";
+    LOG("Compatibility checks complete.");
 };
 
-diag_log "[ATLAS::Compat] Post-initialization complete.";
+LOG("Post-initialization complete.");

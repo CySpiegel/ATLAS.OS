@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Tasks] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -19,10 +19,10 @@ diag_log "[ATLAS::Tasks] Pre-initialization starting...";
             "ATLAS_tasks_failed"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Task registry
-ATLAS_tasks_registry = createHashMap;
+GVAR(registry) = createHashMap;
 
 // ---------------------------------------------------------------------------
 // CBA Settings — Task System
@@ -50,4 +50,4 @@ ATLAS_tasks_registry = createHashMap;
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::Tasks] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

@@ -2,22 +2,27 @@
 
 class CfgPatches {
     class atlas_main {
-        name = "ATLAS.OS - Core Framework";
-        author = AUTHOR;
+        name = "ATLAS.OS - Core";
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {};
         weapons[] = {};
         requiredVersion = 2.16;
-        requiredAddons[] = {"cba_main", "cba_events", "cba_settings", "cba_statemachine"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        requiredAddons[] = {"cba_main", "cba_settings", "cba_xeh"};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_main {
+        tag = "atlas_main";
+        class main {
+            file = "\z\atlas\addons\atlas_main\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"
-#include "CfgSettings.hpp"
 
 // --- Eden Editor Module Category ---
 class CfgFactionClasses {
@@ -25,11 +30,10 @@ class CfgFactionClasses {
     class ATLAS_Modules {
         displayName = "ATLAS.OS";
         priority = 2;
-        side = 7; // logic
+        side = 7;
     };
 };
 
-// --- Eden Editor Subcategories ---
 class CfgVehicleClasses {
     class ATLAS_Core {
         displayName = "Core Systems";

@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Profile] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
     // Spawn/despawn handler — checks profile distances to nearest player
@@ -16,7 +16,7 @@ if (isServer) then {
 
         {
             private _profileID = _x;
-            private _profile = ATLAS_profileRegistry get _profileID;
+            private _profile = EGVAR(profile,registry) get _profileID;
             private _pos = _profile get "position";
             private _spawned = _profile getOrDefault ["spawned", false];
 
@@ -26,15 +26,15 @@ if (isServer) then {
             } forEach _players;
 
             if (!_spawned && {_nearestDist < _spawnDist}) then {
-                [_profileID] call ATLAS_fnc_profile_spawn;
+                [_profileID] call FUNC(spawn);
             };
             if (_spawned && {_nearestDist > _despawnDist}) then {
-                [_profileID] call ATLAS_fnc_profile_despawn;
+                [_profileID] call FUNC(despawn);
             };
-        } forEach (keys ATLAS_profileRegistry);
+        } forEach (keys EGVAR(profile,registry));
     }, 2] call CBA_fnc_addPerFrameHandler;
 
-    diag_log "[ATLAS::Profile] Server-side spawn/despawn handler started (2s cycle).";
+    LOG("Server-side spawn/despawn handler started (2s cycle).");
 };
 
-diag_log "[ATLAS::Profile] Post-initialization complete.";
+LOG("Post-initialization complete.");

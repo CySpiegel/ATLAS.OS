@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Placement] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -17,9 +17,9 @@ diag_log "[ATLAS::Placement] Pre-initialization starting...";
             "ATLAS_placement_groupSpawned"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Placement instance registry
-ATLAS_placement_instances = [];
+GVAR(instances) = [];
 
-diag_log "[ATLAS::Placement] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

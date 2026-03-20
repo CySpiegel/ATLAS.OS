@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::ORBAT] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -16,9 +16,9 @@ diag_log "[ATLAS::ORBAT] Pre-initialization starting...";
             "ATLAS_orbat_updated"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // ORBAT data store — per-side force structure
-ATLAS_orbat_data = createHashMap;
+GVAR(data) = createHashMap;
 
-diag_log "[ATLAS::ORBAT] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

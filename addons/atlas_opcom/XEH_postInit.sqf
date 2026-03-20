@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::OPCOM] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
     // OPCOM decision cycle — runs periodically to evaluate strategic situation
@@ -11,12 +11,12 @@ if (isServer) then {
         {
             private _opcom = _y;
             if (_opcom getOrDefault ["active", false]) then {
-                [_opcom] call ATLAS_fnc_opcom_handler;
+                [_opcom] call FUNC(handler);
             };
-        } forEach ATLAS_opcom_instances;
+        } forEach GVAR(instances);
     }, 30] call CBA_fnc_addPerFrameHandler;
 
-    diag_log "[ATLAS::OPCOM] Server-side decision loop started (30s cycle).";
+    LOG("Server-side decision loop started (30s cycle).");
 };
 
-diag_log "[ATLAS::OPCOM] Post-initialization complete.";
+LOG("Post-initialization complete.");

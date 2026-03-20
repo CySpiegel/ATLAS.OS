@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Persistence] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -19,19 +19,19 @@ diag_log "[ATLAS::Persistence] Pre-initialization starting...";
             "ATLAS_persistence_loaded"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Persistence state
-ATLAS_persistence_config = createHashMap;
-ATLAS_persistence_lastSave = 0;
-ATLAS_persistence_dirty = false;
+GVAR(config) = createHashMap;
+GVAR(lastSave) = 0;
+GVAR(dirty) = false;
 
 // Subscribe to mission ending event for final save
 ["ATLAS_mission_ending", {
     if (isServer) then {
-        diag_log "[ATLAS::Persistence] Mission ending — performing final save...";
-        [] call ATLAS_fnc_persistence_save;
+        LOG("Mission ending — performing final save...");
+        [] call FUNC(save);
     };
 }] call CBA_fnc_addEventHandler;
 
-diag_log "[ATLAS::Persistence] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

@@ -3,23 +3,23 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Tasks] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
-    [] call ATLAS_fnc_tasks_init;
+    [] call FUNC(init);
 
     // Subscribe to OPCOM objective events to generate tasks
     ["ATLAS_opcom_orderIssued", {
         params ["_opcomID", "_order", "_objectiveID"];
-        [_order, _objectiveID] call ATLAS_fnc_tasks_create;
+        [_order, _objectiveID] call FUNC(create);
     }] call CBA_fnc_addEventHandler;
 
     ["ATLAS_opcom_objectiveCaptured", {
         params ["_objectiveID", "_side"];
-        [_objectiveID, "SUCCEEDED"] call ATLAS_fnc_tasks_complete;
+        [_objectiveID, "SUCCEEDED"] call FUNC(complete);
     }] call CBA_fnc_addEventHandler;
 
-    diag_log "[ATLAS::Tasks] Server-side task handler registered.";
+    LOG("Server-side task handler registered.");
 };
 
-diag_log "[ATLAS::Tasks] Post-initialization complete.";
+LOG("Post-initialization complete.");

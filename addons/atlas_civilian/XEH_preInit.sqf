@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Civilian] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -19,15 +19,15 @@ diag_log "[ATLAS::Civilian] Pre-initialization starting...";
             "ATLAS_civilian_hostilityChanged"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Civilian zone registry
-ATLAS_civilian_zones = [];
+GVAR(zones) = [];
 
 // Active civilian count
-ATLAS_civilian_activeCount = 0;
+GVAR(activeCount) = 0;
 
 // Hostility tracking per side
-ATLAS_civilian_hostility = createHashMap;
+GVAR(hostility) = createHashMap;
 
-diag_log "[ATLAS::Civilian] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

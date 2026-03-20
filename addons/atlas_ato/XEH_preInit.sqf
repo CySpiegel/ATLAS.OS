@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::ATO] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -19,13 +19,13 @@ diag_log "[ATLAS::ATO] Pre-initialization starting...";
             "ATLAS_ato_aircraftRTB"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // ATO instance registry
-ATLAS_ato_instances = createHashMap;
+GVAR(instances) = createHashMap;
 
 // Active air missions
-ATLAS_ato_activeMissions = [];
+GVAR(activeMissions) = [];
 
 // Subscribe to OPCOM air support requests
 ["ATLAS_opcom_requestAirSupport", {
@@ -33,9 +33,9 @@ ATLAS_ato_activeMissions = [];
     {
         private _ato = _y;
         if ((_ato get "side") isEqualTo _side) then {
-            [_ato, _type, _targetPos, _priority] call ATLAS_fnc_ato_requestMission;
+            [_ato, _type, _targetPos, _priority] call FUNC(requestMission);
         };
-    } forEach ATLAS_ato_instances;
+    } forEach GVAR(instances);
 }] call CBA_fnc_addEventHandler;
 
-diag_log "[ATLAS::ATO] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

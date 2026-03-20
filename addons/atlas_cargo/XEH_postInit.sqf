@@ -3,11 +3,11 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Cargo] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
-    [] call ATLAS_fnc_cargo_init;
-    diag_log "[ATLAS::Cargo] Server-side cargo system initialized.";
+    [] call FUNC(init);
+    LOG("Server-side cargo system initialized.");
 };
 
 // Client-side — add cargo interaction actions
@@ -18,4 +18,4 @@ if (hasInterface) then {
     }] call CBA_fnc_addEventHandler;
 };
 
-diag_log "[ATLAS::Cargo] Post-initialization complete.";
+LOG("Post-initialization complete.");

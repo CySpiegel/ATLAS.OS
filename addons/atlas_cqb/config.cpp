@@ -3,20 +3,26 @@
 class CfgPatches {
     class atlas_cqb {
         name = "ATLAS.OS - Close Quarters Battle (CQB)";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {"ATLAS_Module_CQB"};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main", "atlas_profile"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_cqb {
+        tag = "atlas_cqb";
+        class cqb {
+            file = "\z\atlas\addons\atlas_cqb\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"
 
 class CfgVehicles {
     class Logic;
@@ -36,7 +42,7 @@ class CfgVehicles {
     class ATLAS_Module_CQB : Module_F {
         scope = 2;
         displayName = "CQB Garrison";
-        icon = "\z\atlas\addons\atlas_cqb\ui\icon_cqb_ca.paa";
+        icon = "\z\atlas\addons\atlas_cqb\ui\icon.png";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Military";
         function = "ATLAS_fnc_cqb_moduleInit";

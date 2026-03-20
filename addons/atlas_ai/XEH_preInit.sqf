@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::AI] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -17,7 +17,7 @@ diag_log "[ATLAS::AI] Pre-initialization starting...";
             "ATLAS_ai_suppressed"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // ---------------------------------------------------------------------------
 // CBA Settings — AI Behavior
@@ -56,4 +56,4 @@ diag_log "[ATLAS::AI] Pre-initialization starting...";
     {}
 ] call CBA_fnc_addSetting;
 
-diag_log "[ATLAS::AI] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

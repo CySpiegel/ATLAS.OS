@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::CQB] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -18,12 +18,12 @@ diag_log "[ATLAS::CQB] Pre-initialization starting...";
             "ATLAS_cqb_despawned"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // CQB zone registry
-ATLAS_cqb_zones = createHashMap;
+GVAR(zones) = createHashMap;
 
 // Building cache — avoids re-scanning buildings
-ATLAS_cqb_buildingCache = createHashMap;
+GVAR(buildingCache) = createHashMap;
 
-diag_log "[ATLAS::CQB] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

@@ -3,17 +3,23 @@
 class CfgPatches {
     class atlas_reports {
         name = "ATLAS.OS - Reporting System";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_reports {
+        tag = "atlas_reports";
+        class reports {
+            file = "\z\atlas\addons\atlas_reports\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"

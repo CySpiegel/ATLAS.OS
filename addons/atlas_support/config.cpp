@@ -3,20 +3,26 @@
 class CfgPatches {
     class atlas_support {
         name = "ATLAS.OS - Combat Support";
-        author = AUTHOR;
+        author = "ATLAS.OS Team";
         url = "https://github.com/CySpiegel/ATLAS.OS";
         units[] = {"ATLAS_Module_Support"};
         weapons[] = {};
         requiredVersion = 2.16;
         requiredAddons[] = {"atlas_main"};
-        version = VERSION;
-        versionStr = VERSION_STR;
-        versionAr[] = {VERSION_AR};
+        version = "0.1.0";
+    };
+};
+
+class CfgFunctions {
+    class atlas_support {
+        tag = "atlas_support";
+        class support {
+            file = "\z\atlas\addons\atlas_support\functions";
+        };
     };
 };
 
 #include "CfgEventHandlers.hpp"
-#include "CfgFunctions.hpp"
 
 class CfgVehicles {
     class Logic;
@@ -36,7 +42,7 @@ class CfgVehicles {
     class ATLAS_Module_Support : Module_F {
         scope = 2;
         displayName = "Combat Support";
-        icon = "\z\atlas\addons\atlas_support\ui\icon_support_ca.paa";
+        icon = "\z\atlas\addons\atlas_support\ui\icon.png";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Support";
         function = "ATLAS_fnc_support_moduleInit";

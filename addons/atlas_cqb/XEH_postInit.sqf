@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::CQB] Post-initialization starting...";
+LOG("Post-initialization starting...");
 
 if (isServer) then {
     // Player proximity check — spawn/despawn CQB garrisons based on player distance
@@ -17,15 +17,15 @@ if (isServer) then {
             private _dist = _player distance2D _zonePos;
 
             if (_dist < _radius + 200 && {!_active}) then {
-                [_zone] call ATLAS_fnc_cqb_garrison;
+                [_zone] call FUNC(garrison);
             };
             if (_dist > _radius + 500 && {_active}) then {
-                [_zone] call ATLAS_fnc_cqb_despawn;
+                [_zone] call FUNC(despawn);
             };
-        } forEach ATLAS_cqb_zones;
+        } forEach GVAR(zones);
     }] call CBA_fnc_addEventHandler;
 
-    diag_log "[ATLAS::CQB] Server-side proximity handler registered.";
+    LOG("Server-side proximity handler registered.");
 };
 
-diag_log "[ATLAS::CQB] Post-initialization complete.";
+LOG("Post-initialization complete.");

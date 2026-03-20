@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::OPCOM] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module with core framework
 [
@@ -19,10 +19,10 @@ diag_log "[ATLAS::OPCOM] Pre-initialization starting...";
             "ATLAS_opcom_phaseChanged"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // OPCOM instance registry — one per side
-ATLAS_opcom_instances = createHashMap;
+GVAR(instances) = createHashMap;
 
 // Subscribe to objective events
 ["ATLAS_objective_statusChanged", {
@@ -30,9 +30,9 @@ ATLAS_opcom_instances = createHashMap;
     {
         private _opcom = _y;
         if ((_opcom get "side") isEqualTo _side) then {
-            [_opcom, _objectiveID, _newStatus] call ATLAS_fnc_opcom_evaluate;
+            [_opcom, _objectiveID, _newStatus] call FUNC(evaluate);
         };
-    } forEach ATLAS_opcom_instances;
+    } forEach GVAR(instances);
 }] call CBA_fnc_addEventHandler;
 
-diag_log "[ATLAS::OPCOM] Pre-initialization complete.";
+LOG("Pre-initialization complete.");

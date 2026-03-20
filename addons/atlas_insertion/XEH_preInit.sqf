@@ -3,7 +3,7 @@
 // ============================================================================
 #include "script_component.hpp"
 
-diag_log "[ATLAS::Insertion] Pre-initialization starting...";
+LOG("Pre-initialization starting...");
 
 // Register module
 [
@@ -18,10 +18,10 @@ diag_log "[ATLAS::Insertion] Pre-initialization starting...";
             "ATLAS_insertion_playerSpawned"
         ]]
     ]
-] call ATLAS_fnc_registerModule;
+] call EFUNC(main,registerModule);
 
 // Spawn point registry
-ATLAS_insertion_points = [];
-ATLAS_insertion_defaultPoint = objNull;
+GVAR(points) = [];
+GVAR(defaultPoint) = objNull;
 
-diag_log "[ATLAS::Insertion] Pre-initialization complete.";
+LOG("Pre-initialization complete.");
