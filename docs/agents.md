@@ -249,6 +249,168 @@ The scheduler replaces all individual module PFHs. Modules register their tick f
 - `P:/athena/addons/core/functions/fnc_schedulerTick.sqf` — priority dispatch chain
 - `P:/athena/addons/core/functions/fnc_autoBudget.sqf` — EMA FPS tracking, budget scaling
 - `P:/athena/addons/core/functions/fnc_processBrain.sqf` — round-robin within budget
+- `P:/athena/addons/core/functions/fnc_updateLOD.sqf` — LOD tier classification with budget guard
+
+---
+
+## How ATLAS.OS Leverages Athena's Scheduler Pattern
+
+### The Problem
+
+Athena manages **individual AI units** — each unit gets a brain tick, physiology update, and memory decay. The scheduler processes N units per frame within a ms budget.
+
+ATLAS.OS manages **entire armies** — 10,000+ virtual profiles, objectives, bases, supply chains, influence maps, morale, weather, diplomacy, convoys, and more. The workloads are fundamentally different:
+
+| Dimension | Athena | ATLAS.OS |
+|-----------|--------|----------|
+| Work items | ~200 AI units | 10,000+ profiles + objectives + bases + convoys |
+| Item types | Uniform (all units get same tick) | Heterogeneous (profiles, objectives, cells, convoys are different work) |
+| Priority | Distance-based LOD | Strategic importance + proximity |
+| Tick rate | 0.25s–5s per unit based on LOD | 0.25s–60s per subsystem based on urgency |
+| Budget consumers | 2 (brain + tactics) | 8+ subsystems competing for frame time |
+
+### Adaptation: Multi-Pool Scheduler
+
+Instead of athena's single round-robin pool, ATLAS.OS uses **multiple pools** within the same single-PFH dispatcher. Each pool has its own:
+- Round-robin index
+- Auto-budget allocation (ms)
+- Interval timer
+- Item count
+- Per-item cost EMA
+
+The auto-budget divides the total frame budget (from `schedulerFramePct`) across pools proportional to their item count and urgency weight.
+
+### Budget Allocation Algorithm
+
+```
+Total budget = (1000 / targetFPS) * (framePct / 100)
+Example: (1000/40) * (15/100) = 3.75ms per frame
+
+Pool allocation:
+  profileMove:  weight 3.0 × itemCount → proportional share
+  opcom:        weight 2.0 × itemCount → proportional share
+  influence:    weight 1.0 × cellCount → proportional share
+  morale:       weight 1.5 × itemCount → proportional share
+  convoy:       weight 1.0 × itemCount → proportional share
+
+Each pool gets: (poolWeight × poolItems) / totalWeightedItems × totalBudget
+Clamped to [1.0ms floor, poolCeiling]
+```
+
+### LOD Concept for Profiles (from athena's LOD tiers)
+
+Athena classifies units by distance: hot (full processing), warm (reduced), cold (minimal), frozen (skip). ATLAS.OS applies the same concept to **profiles**:
+
+| Tier | Condition | Virtual Move Rate | Morale Check | OPCOM Priority |
+|------|-----------|-------------------|--------------|----------------|
+| HOT | Profile within 2000m of any player | Every tick (0.25s) | Every tick | Highest |
+| WARM | Profile within 5000m of any player | Every 4th tick (1s) | Every 2nd tick | Normal |
+| COLD | Profile beyond 5000m | Every 16th tick (4s) | Every 8th tick | Low |
+| FROZEN | Profile idle (no waypoints, garrisoned) | Skip | Every 30s | Skip |
+
+This means 10,000 profiles don't all need processing every tick. At any given time:
+- ~200 HOT profiles (near players) get full attention
+- ~800 WARM profiles get reduced attention
+- ~5000 COLD profiles get minimal attention
+- ~4000 FROZEN profiles are skipped entirely
+
+**Effective work per tick**: ~200 HOT + 200 WARM/4 + 313 COLD/16 = **~270 items**, not 10,000.
+
+### EMA Cost Tracking Per Pool
+
+Each pool tracks its per-item cost using Exponential Moving Average (from athena's `autoBudgetSmoothedCost`):
+
+```sqf
+// After processing N items in pool:
+private _elapsed = (diag_tickTime - _start) * 1000;
+private _costPerItem = _elapsed / (_processed max 1);
+GVAR(poolCost_profileMove) = GVAR(poolCost_profileMove) * 0.8 + _costPerItem * 0.2;
+```
+
+This lets the auto-budget predict how many items it can process within budget:
+```sqf
+private _maxItems = floor (GVAR(profileMoveBudget) / GVAR(poolCost_profileMove));
+```
+
+### Pressure Response (from athena's headroom calculation)
+
+When FPS drops below target:
+
+1. **Mild pressure** (FPS 5-15% below target): Reduce all pool budgets by pressure × 0.3
+2. **Heavy pressure** (FPS 15-30% below target): Reduce budgets by pressure × 0.5, promote COLD→FROZEN for distant profiles
+3. **Critical pressure** (FPS >30% below target): Emergency — only process HOT profiles, skip all WARM/COLD, fire `atlas_performance_degraded` event
+
+Recovery requires 5 consecutive ticks above target (from athena's hysteresis approach, adapted from §27.6).
+
+### Event-Driven vs Scheduled
+
+Some ATLAS subsystems should NOT be in the scheduler — they should remain event-driven:
+
+| Subsystem | Pattern | Why |
+|-----------|---------|-----|
+| Spawn/despawn | Event (`ATLAS_player_areaChanged`) | Only fires when player crosses grid cell — zero cost when stationary |
+| CQB garrison | Event (`ATLAS_player_areaChanged`) | Same — no polling needed |
+| Profile destroyed | Event (`EntityKilled` EH) | Instant response, not periodic |
+| Objective captured | Event (presence check) | Driven by profile proximity events |
+| Base supply shortage | Event (threshold check in supply consumption) | Fires only when supply drops below threshold |
+
+The scheduler handles the **periodic bulk work**: virtual movement, morale updates, influence map recalculation, convoy routing, grid sync. Events handle the **reactive instant work**.
+
+### Implementation: Module Registration
+
+Instead of modules calling `CBA_fnc_addPerFrameHandler`, they register a tick function with the scheduler:
+
+```sqf
+// In atlas_profile XEH_postInit.sqf:
+[
+    "profileMove",              // pool name
+    FUNC(virtualMoveTick),      // tick function
+    0.25,                       // interval (seconds)
+    3.0,                        // urgency weight
+    "profileRegistry"           // items source (registry key or function)
+] call EFUNC(main,registerSchedulerPool);
+```
+
+The scheduler owns the PFH. Modules just provide their tick function and config. This means:
+- Adding a new subsystem = one `registerSchedulerPool` call
+- Removing a subsystem = comment out the registration
+- No module ever touches `CBA_fnc_addPerFrameHandler` directly
+- Auto-budget automatically incorporates new pools
+
+### Debug Overlay
+
+When `atlas_main_perfMonitor` is enabled, the perf overlay shows per-pool stats:
+
+```
+ATLAS.OS Scheduler
+─────────────────────────
+Pool            Budget   Used    Items   Cost/Item
+profileMove     1.20ms   0.95ms  47/200  0.020ms
+opcom           0.80ms   0.12ms  3/50    0.040ms
+influence       0.50ms   0.38ms  10/3600 0.038ms
+morale          0.40ms   0.15ms  5/200   0.030ms
+convoy          0.20ms   0.02ms  2/3     0.010ms
+─────────────────────────
+Total           3.10ms   1.62ms  FPS: 48.2
+Headroom        +1.48ms  Target: 40 FPS
+```
+
+### Files to Create
+
+| File | Description |
+|------|-------------|
+| `fnc_initScheduler.sqf` | Stagger timers, create pool registry, start single PFH |
+| `fnc_schedulerTick.sqf` | Priority `exitWith` chain, dispatch pools by timer |
+| `fnc_autoBudget.sqf` | EMA FPS, per-pool cost tracking, budget reallocation |
+| `fnc_registerSchedulerPool.sqf` | Module API to register a tick function with the scheduler |
+| `fnc_schedulerDebug.sqf` | Perf overlay rendering (client-side) |
+
+### Migration Plan
+
+1. Implement scheduler in `atlas_main`
+2. Remove the 3 existing PFHs (player grid check, perf monitor, profile grid sync)
+3. Register them as scheduler pools instead
+4. As new modules are implemented (OPCOM, LOGCOM, etc.), they register pools — never create PFHs
 
 ---
 
