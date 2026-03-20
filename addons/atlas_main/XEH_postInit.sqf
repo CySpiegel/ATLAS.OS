@@ -20,7 +20,7 @@ if (isServer) then {
                 ["ATLAS_player_areaChanged", [_player, _cell, _lastCell]] call CBA_fnc_localEvent;
             };
         } forEach allPlayers;
-    }, 1] call CBA_fnc_addPerFrameHandler;
+    }, 2] call CBA_fnc_addPerFrameHandler;
 
     addMissionEventHandler ["PlayerConnected", {
         params ["_id", "_uid", "_name", "_jip", "_owner", "_idstr"];

@@ -1,27 +1,10 @@
-// ============================================================================
-// ATLAS.OS Reporting System — Post-Initialization
-// ============================================================================
 #include "script_component.hpp"
 
-LOG("Post-initialization starting...");
+LOG("PostInit starting");
 
 if (isServer) then {
-    [] call FUNC(init);
-
-    // Auto SPOTREP on contact
-    if (ATLAS_reports_autoSpotrep) then {
-        ["ATLAS_profile_spawned", {
-            params ["_profileID"];
-            // Hook contact events for spawned groups
-        }] call CBA_fnc_addEventHandler;
-    };
-
-    // Periodic SITREP generation
-    [{
-        [] call FUNC(sitrep);
-    }, ATLAS_reports_sitrepInterval] call CBA_fnc_addPerFrameHandler;
-
-    LOG("Server-side report handlers registered.");
+    // TODO: Implement server-side initialization
+    LOG("Server-side stub — no active handlers");
 };
 
-LOG("Post-initialization complete.");
+LOG("PostInit complete");

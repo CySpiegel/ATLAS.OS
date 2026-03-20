@@ -1,19 +1,10 @@
-// ============================================================================
-// ATLAS.OS Map Markers — Post-Initialization
-// ============================================================================
 #include "script_component.hpp"
 
-LOG("Post-initialization starting...");
+LOG("PostInit starting");
 
-// Marker updates run client-side for performance
-if (hasInterface) then {
-    [] call FUNC(init);
-
-    [{
-        [] call FUNC(update);
-    }, ATLAS_markers_updateInterval] call CBA_fnc_addPerFrameHandler;
-
-    LOG("Client-side marker update handler started.");
+if (isServer) then {
+    // TODO: Implement server-side initialization
+    LOG("Server-side stub — no active handlers");
 };
 
-LOG("Post-initialization complete.");
+LOG("PostInit complete");

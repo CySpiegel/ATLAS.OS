@@ -2,17 +2,23 @@
 // ============================================================================
 // atlas_main_fnc_moduleInit
 // ============================================================================
-// Called by the engine when ATLAS_ModuleMain is placed in a mission.
-// Delegates to fnc_init if not already initialized.
+// Called by the engine when ATLAS_ModuleMain is placed/activated.
+// In 3DEN editor, _this is a string (classname). At mission runtime,
+// _this is [logic, units, activated].
 //
 // @return Nothing
 // @context Server only
 // @scheduled false
 // ============================================================================
 
-private _logic = param [0, objNull, [objNull]];
-private _units = param [1, [], [[]]];
-private _activated = param [2, true, [true]];
+// Handle both 3DEN (string) and runtime ([logic, units, activated]) calling conventions
+if (_this isEqualType "") exitWith {};  // 3DEN editor placement — do nothing
+if (_this isEqualType objNull) exitWith {};  // Single object reference — do nothing
+
+if !(_this isEqualType []) exitWith {};  // Unknown format — ignore
+
+private _logic = _this param [0, objNull, [objNull]];
+private _activated = _this param [2, true, [true]];
 
 if (isNull _logic) exitWith {};
 if (!_activated) exitWith {};

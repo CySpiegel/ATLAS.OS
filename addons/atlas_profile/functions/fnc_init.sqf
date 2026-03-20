@@ -35,6 +35,6 @@ if (!isServer) exitWith {};
             if (_processed >= _budget) exitWith {};
         };
     } forEach EGVAR(main,profileRegistry);
-}, 2] call CBA_fnc_addPerFrameHandler;
+}, 5] call CBA_fnc_addPerFrameHandler;
 
 LOG("Profile system initialized");

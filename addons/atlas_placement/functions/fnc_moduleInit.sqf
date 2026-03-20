@@ -2,18 +2,20 @@
 // ============================================================================
 // atlas_placement_fnc_moduleInit
 // ============================================================================
-// Called by the engine when an ATLAS_Module_Placement is activated.
-// Reads module attributes, builds a config HashMap, queues for processing.
+// Called by the engine when ATLAS_Module_Placement is placed/activated.
+// In 3DEN editor, _this is a string. At mission runtime, [logic, units, activated].
 //
 // @return Nothing
 // @context Server only
 // @scheduled false
 // ============================================================================
 
-// Module_F passes [logic, units, activated] but may vary by context
-private _logic = param [0, objNull, [objNull]];
-private _units = param [1, [], [[]]];
-private _activated = param [2, true, [true]];
+if (_this isEqualType "") exitWith {};
+if (_this isEqualType objNull) exitWith {};
+if !(_this isEqualType []) exitWith {};
+
+private _logic = _this param [0, objNull, [objNull]];
+private _activated = _this param [2, true, [true]];
 
 if (isNull _logic) exitWith {};
 if (!_activated) exitWith {};
