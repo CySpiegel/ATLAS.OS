@@ -39,13 +39,19 @@ class CfgVehicles {
         class ModuleDescription;
     };
 
-    class ATLAS_Module_Support : Module_F {
+    class ATLAS_ModuleBase : Module_F {
+        scope = 1;
+        category = "ATLAS_Modules";
+    };
+
+    class ATLAS_Module_Support : ATLAS_ModuleBase {
         scope = 2;
         displayName = "Combat Support";
-        icon = "\z\atlas\addons\atlas_support\ui\icon.png";
+        icon = "\a3\Modules_F\data\iconModule_ca.paa";
+        picture = "\a3\Modules_F\data\iconModule_ca.paa";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Support";
-        function = "ATLAS_fnc_support_moduleInit";
+        function = "atlas_support_fnc_moduleInit";
         functionPriority = 5;
         isGlobal = 1;
         isTriggerActivated = 0;

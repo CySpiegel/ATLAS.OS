@@ -39,13 +39,19 @@ class CfgVehicles {
         class ModuleDescription;
     };
 
-    class ATLAS_Module_Civilian : Module_F {
+    class ATLAS_ModuleBase : Module_F {
+        scope = 1;
+        category = "ATLAS_Modules";
+    };
+
+    class ATLAS_Module_Civilian : ATLAS_ModuleBase {
         scope = 2;
         displayName = "Civilian Population";
-        icon = "\z\atlas\addons\atlas_civilian\ui\icon.png";
+        icon = "\a3\Modules_F\data\iconModule_ca.paa";
+        picture = "\a3\Modules_F\data\iconModule_ca.paa";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Civilian";
-        function = "ATLAS_fnc_civilian_moduleInit";
+        function = "atlas_civilian_fnc_moduleInit";
         functionPriority = 4;
         isGlobal = 1;
         isTriggerActivated = 0;

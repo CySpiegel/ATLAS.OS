@@ -39,13 +39,19 @@ class CfgVehicles {
         class ModuleDescription;
     };
 
-    class ATLAS_Module_Persistence : Module_F {
+    class ATLAS_ModuleBase : Module_F {
+        scope = 1;
+        category = "ATLAS_Modules";
+    };
+
+    class ATLAS_Module_Persistence : ATLAS_ModuleBase {
         scope = 2;
         displayName = "Persistence";
-        icon = "\z\atlas\addons\atlas_persistence\ui\icon.png";
+        icon = "\a3\Modules_F\data\iconModule_ca.paa";
+        picture = "\a3\Modules_F\data\iconModule_ca.paa";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Core";
-        function = "ATLAS_fnc_persistence_moduleInit";
+        function = "atlas_persistence_fnc_moduleInit";
         functionPriority = 10;
         isGlobal = 1;
         isTriggerActivated = 0;

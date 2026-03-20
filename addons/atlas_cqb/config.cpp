@@ -39,13 +39,19 @@ class CfgVehicles {
         class ModuleDescription;
     };
 
-    class ATLAS_Module_CQB : Module_F {
+    class ATLAS_ModuleBase : Module_F {
+        scope = 1;
+        category = "ATLAS_Modules";
+    };
+
+    class ATLAS_Module_CQB : ATLAS_ModuleBase {
         scope = 2;
         displayName = "CQB Garrison";
-        icon = "\z\atlas\addons\atlas_cqb\ui\icon.png";
+        icon = "\a3\Modules_F\data\iconModule_ca.paa";
+        picture = "\a3\Modules_F\data\iconModule_ca.paa";
         category = "ATLAS_Modules";
         vehicleClass = "ATLAS_Military";
-        function = "ATLAS_fnc_cqb_moduleInit";
+        function = "atlas_cqb_fnc_moduleInit";
         functionPriority = 3;
         isGlobal = 1;
         isTriggerActivated = 0;

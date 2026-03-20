@@ -39,27 +39,30 @@ class CfgVehicles {
         class ModuleDescription;
     };
 
-    class ATLAS_Module_Placement : Module_F {
-        scope = 2;
-        displayName = "Military Placement";
-        icon = "";
+    class ATLAS_ModuleBase : Module_F {
+        scope = 1;
         category = "ATLAS_Modules";
-        vehicleClass = "ATLAS_Military";
-        function = "atlas_placement_fnc_moduleInit";
-        functionPriority = 2;
         isGlobal = 1;
         isTriggerActivated = 0;
         isDisposable = 0;
-        is3DEN = 0;
-
+        is3DEN = 1;
         curatorCanAttach = 1;
-        canSetArea = 0;
+        author = "ATLAS.OS Team";
+    };
+
+    class ATLAS_Module_Placement : ATLAS_ModuleBase {
+        scope = 2;
+        displayName = "ATLAS - Military Placement";
+        icon = "\a3\Modules_F\data\iconModule_ca.paa";
+        picture = "\a3\Modules_F\data\iconModule_ca.paa";
+        function = "atlas_placement_fnc_moduleInit";
+        functionPriority = 2;
 
         class Attributes : AttributesBase {
             class ATLAS_placement_side : Combo {
                 property = "ATLAS_placement_side";
                 displayName = "Side";
-                tooltip = "The side that the placed military forces belong to. This determines allegiance, friend/foe identification, and which OPCOM can command these units. Ensure this matches the OPCOM module side if you want the AI commander to control these forces.";
+                tooltip = "The side that the placed military forces belong to.";
                 typeName = "NUMBER";
                 defaultValue = "1";
                 class Values {
@@ -81,7 +84,7 @@ class CfgVehicles {
             class ATLAS_placement_faction : Edit {
                 property = "ATLAS_placement_faction";
                 displayName = "Faction Classname";
-                tooltip = "The CfgFaction classname to pull unit compositions from. This determines which specific uniforms, vehicles, and equipment the placed forces use. Examples: 'BLU_F' (NATO), 'OPF_F' (CSAT), 'IND_F' (AAF), 'BLU_CTRG_F' (CTRG). Must be a valid faction classname from your loaded mods. Leave empty to use the default faction for the selected side.";
+                tooltip = "CfgFaction classname (e.g. BLU_F, OPF_F, IND_F).";
                 typeName = "STRING";
                 defaultValue = """BLU_F""";
             };
@@ -89,7 +92,7 @@ class CfgVehicles {
             class ATLAS_placement_size : Combo {
                 property = "ATLAS_placement_size";
                 displayName = "Force Size";
-                tooltip = "Determines the overall size of the military force to be placed across objectives.\n\nCompany (~120 units): Suitable for small-scale operations with 3-5 objectives. Good for cooperative missions with 4-8 players. Lower server performance impact.\n\nBattalion (~400 units): Medium-scale operations with 5-15 objectives. Recommended for 8-20 player missions. Moderate server load.\n\nBrigade (~1200 units): Large-scale warfare with 10-30+ objectives. Best for dedicated servers with 20+ players. High server performance impact — ensure adequate hardware.";
+                tooltip = "Overall size of the military force placed across objectives.";
                 typeName = "STRING";
                 defaultValue = """company""";
                 class Values {
@@ -111,7 +114,7 @@ class CfgVehicles {
             class ATLAS_placement_objectivesOnly : CheckboxNumber {
                 property = "ATLAS_placement_objectivesOnly";
                 displayName = "Objectives Only";
-                tooltip = "When enabled, forces are placed exclusively at synced objective markers/locations. When disabled, forces are distributed organically across the area of operations including patrols between objectives, roadblocks, observation posts, and reserve positions. Disable for more realistic force distribution; enable for tighter, more predictable gameplay.";
+                tooltip = "When enabled, forces are placed only at synced objectives.";
                 typeName = "NUMBER";
                 defaultValue = "0";
             };
@@ -120,7 +123,7 @@ class CfgVehicles {
         };
 
         class ModuleDescription : ModuleDescription {
-            description = "Military Placement populates the battlefield with profiled military units based on the selected faction and force size. Units are distributed across objectives and key terrain. Place this module and sync it to an OPCOM module to give the AI commander control of the placed forces. Multiple placement modules can be used to create multi-faction scenarios. Sync to specific trigger areas or objective markers to constrain placement regions.";
+            description = "Populates the battlefield with profiled military units. Sync to an OPCOM module for AI command. Multiple placement modules create multi-faction scenarios.";
             sync[] = {"ATLAS_Module_OPCOM"};
         };
     };

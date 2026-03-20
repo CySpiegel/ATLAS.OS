@@ -210,6 +210,95 @@ git push origin v0.1.0
 
 ---
 
+## Eden Editor Module Fix Log (2026-03-19)
+
+### Problem
+Modules were not appearing in the Eden Editor. Three root causes:
+
+1. **Missing icon files** — `icon` properties pointed to `.paa` files that didn't exist, causing RPT errors
+2. **Wrong function references** — Used `ATLAS_fnc_xxx_moduleInit` instead of the correct `atlas_xxx_fnc_moduleInit` (CBA macro expansion format)
+3. **Missing parent class declarations** — HEMTT validates configs per-PBO. Child PBOs inheriting `ATLAS_ModuleBase` couldn't resolve `AttributesBase`, `Combo`, `Edit`, `CheckboxNumber` because those classes are defined in `Module_F` which wasn't redeclared
+
+### Solution (Derived from ALiVE Pattern)
+
+Referenced `github.com/ALiVEOS/ALiVE.OS/master/addons/main/CfgVehicles.hpp`:
+
+1. `CfgFactionClasses` with `side = 7` (Logic) creates the ATLAS.OS category in Eden
+2. `ATLAS_ModuleBase : Module_F` with `scope = 1` provides shared defaults (hidden)
+3. **Every module PBO** must redeclare the full `Module_F` → `AttributesBase` hierarchy
+4. Icons temporarily use vanilla fallback: `\a3\Modules_F\data\iconModule_ca.paa`
+5. Function references use: `atlas_<component>_fnc_moduleInit`
+
+### Config Pattern (Template for New Modules)
+
+```cpp
+class CfgVehicles {
+    class Logic;
+    class Module_F : Logic {
+        class AttributesBase {
+            class Default;
+            class Edit;
+            class Combo;
+            class Checkbox;
+            class CheckboxNumber;
+            class ModuleDescription;
+            class Units;
+        };
+        class ModuleDescription;
+    };
+
+    class ATLAS_ModuleBase : Module_F {
+        scope = 1;
+        category = "ATLAS_Modules";
+        isGlobal = 1;
+        isTriggerActivated = 0;
+        isDisposable = 0;
+        is3DEN = 1;
+        curatorCanAttach = 1;
+        author = "ATLAS.OS Team";
+    };
+
+    class ATLAS_Module_XXX : ATLAS_ModuleBase {
+        scope = 2;
+        displayName = "ATLAS - Module Name";
+        icon = "\a3\Modules_F\data\iconModule_ca.paa";
+        picture = "\a3\Modules_F\data\iconModule_ca.paa";
+        function = "atlas_xxx_fnc_moduleInit";
+        functionPriority = 2;
+
+        class Attributes : AttributesBase {
+            // module-specific attributes here
+            class ModuleDescription : ModuleDescription {};
+        };
+
+        class ModuleDescription : ModuleDescription {
+            description = "Description text.";
+            sync[] = {};
+        };
+    };
+};
+```
+
+### Files Modified
+
+| File | Key Changes |
+|------|-------------|
+| `atlas_main/config.cpp` | Added `A3_Modules_F` to requiredAddons, created `ATLAS_ModuleBase`, fixed icon, added `CfgFactionClasses` |
+| `atlas_placement/config.cpp` | Full Module_F hierarchy, fixed function ref, fixed icon |
+| `atlas_ato/config.cpp` | Added ATLAS_ModuleBase, fixed `atlas_ato_fnc_moduleInit` |
+| `atlas_civilian/config.cpp` | Added ATLAS_ModuleBase, fixed `atlas_civilian_fnc_moduleInit` |
+| `atlas_cqb/config.cpp` | Added ATLAS_ModuleBase, fixed `atlas_cqb_fnc_moduleInit` |
+| `atlas_insertion/config.cpp` | Added ATLAS_ModuleBase, fixed `atlas_insertion_fnc_moduleInit` |
+| `atlas_opcom/config.cpp` | Added ATLAS_ModuleBase, fixed `atlas_opcom_fnc_moduleInit` |
+| `atlas_persistence/config.cpp` | Added ATLAS_ModuleBase, fixed `atlas_persistence_fnc_moduleInit` |
+| `atlas_support/config.cpp` | Added ATLAS_ModuleBase, fixed `atlas_support_fnc_moduleInit` |
+
+### TODO
+- [ ] Create custom military-styled PAA icons for each module
+- [ ] Verify modules appear correctly in Eden Editor in-game
+
+---
+
 ## Arma 3 Install Location
 
 ```
