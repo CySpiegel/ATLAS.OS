@@ -166,6 +166,92 @@ private _registry = EGVAR(main,profileRegistry);
 
 ---
 
+## Scheduler & Auto-Budget System (adapted from athena)
+
+### Design (from `P:/athena/addons/core/`)
+
+ATLAS.OS uses a **single per-frame handler** that dispatches to subsystems via staggered timers. This eliminates the problem of 10+ independent PFHs all running on the same frame tick. The pattern is derived from athena's scheduler (`fnc_initScheduler.sqf`, `fnc_schedulerTick.sqf`, `fnc_autoBudget.sqf`).
+
+### Key Principles
+
+1. **One PFH to rule them all** — a single `CBA_fnc_addPerFrameHandler` at rate `0` (every frame) dispatches to subsystems. No module registers its own PFH.
+
+2. **Priority-based `exitWith` chain** — only ONE subsystem runs per frame tick, highest priority first:
+   ```sqf
+   if (_now >= GVAR(nextProfileMoveTime)) exitWith { ... };
+   if (_now >= GVAR(nextOPCOMTime))       exitWith { ... };
+   if (_now >= GVAR(nextInfluenceTime))   exitWith { ... };
+   // etc.
+   ```
+
+3. **Staggered initial offsets** — subsystems are offset at init so they never pile up on the same frame:
+   ```sqf
+   GVAR(nextProfileMoveTime) = _now + 0.5;
+   GVAR(nextOPCOMTime)       = _now + 1.0;
+   GVAR(nextInfluenceTime)   = _now + 1.5;
+   GVAR(nextCivilianTime)    = _now + 2.0;
+   GVAR(nextGCTime)          = _now + 3.0;
+   ```
+
+4. **Round-robin within budget** — each subsystem processes items in a `while` loop bounded by `diag_tickTime`:
+   ```sqf
+   private _budget = GVAR(profileMoveBudget) / 1000;
+   private _start = diag_tickTime;
+   while {_idx < _count && {diag_tickTime - _start < _budget}} do {
+       // process one profile
+       _idx = _idx + 1;
+   };
+   GVAR(profileMoveIdx) = _idx mod _count;  // wrap for next tick
+   ```
+
+5. **Auto-budget adjusts ms allocation based on FPS**:
+   - Every 2 seconds, measure `diag_fps` (EMA smoothed, 70/30 weight)
+   - Compute `headroom = (1000/targetFPS) - (1000/currentFPS)`
+   - If headroom > 0: gently increase budget toward desired (30% lerp)
+   - If headroom < 0: pressure-scale budget down (up to 40% reduction)
+   - Ceiling: `targetFrameTime * (framePct / 100)` — user-configurable in CBA settings
+   - Floor: 1ms minimum (diag_tickTime can't measure below this)
+
+### CBA Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `atlas_main_schedulerTargetFPS` | SLIDER | 40 | Target FPS floor. Budget scales down as FPS approaches this. |
+| `atlas_main_schedulerFramePct` | SLIDER | 15 | Max % of frame time ATLAS scheduler can use. 10-15% listen server, 20-30% dedicated. |
+
+### ATLAS Subsystem Priority Order
+
+| Priority | Subsystem | Interval | Budget Source | Items |
+|----------|-----------|----------|---------------|-------|
+| 1 (highest) | Profile virtual movement | 0.25s | autoBudget | Virtual profiles |
+| 2 | Spawn/despawn check | 2.0s | fixed | Players × nearby profiles |
+| 3 | OPCOM decision tick | 30.0s | autoBudget | Objectives |
+| 4 | Influence map update | 30.0s | autoBudget | Grid cells |
+| 5 | Morale update | 5.0s | autoBudget | All profiles |
+| 6 | LOGCOM convoy tick | 10.0s | fixed | Active convoys |
+| 7 | Civilian ambient | 5.0s | fixed | Nearby players |
+| 8 | CQB garrison check | event-driven | — | On player area change |
+| 9 | GC cleanup | 10.0s | fixed | Death queue |
+| 10 | Grid sync (spawned) | 5.0s | fixed | Spawned profiles |
+| 11 (lowest) | Auto-budget recalc | 2.0s | — | — |
+
+### Implementation Plan
+
+Files to create in `addons/atlas_main/functions/`:
+- `fnc_initScheduler.sqf` — stagger timers, set initial budgets, start single PFH
+- `fnc_schedulerTick.sqf` — priority `exitWith` chain, dispatch to subsystems
+- `fnc_autoBudget.sqf` — EMA-smoothed FPS monitoring, budget adjustment
+
+The scheduler replaces all individual module PFHs. Modules register their tick function with the scheduler rather than calling `CBA_fnc_addPerFrameHandler` themselves.
+
+### Reference Files (athena)
+- `P:/athena/addons/core/functions/fnc_initScheduler.sqf` — staggered init, single PFH
+- `P:/athena/addons/core/functions/fnc_schedulerTick.sqf` — priority dispatch chain
+- `P:/athena/addons/core/functions/fnc_autoBudget.sqf` — EMA FPS tracking, budget scaling
+- `P:/athena/addons/core/functions/fnc_processBrain.sqf` — round-robin within budget
+
+---
+
 ## Testing in Arma 3
 
 ### Quick Test
