@@ -414,6 +414,379 @@ Headroom        +1.48ms  Target: 40 FPS
 
 ---
 
+## Virtual Simulation Engine (Scheduled Environment)
+
+### Architecture Decision: Scheduled vs Unscheduled
+
+After reviewing athena's PFH pattern and ALiVE's profile simulator, the correct split is:
+
+**Unscheduled (PFH / events)** — things that touch the real game world:
+- Spawn/despawn (creates actual Arma units — max 1 per frame)
+- Player grid cell tracking (reads `getPosATL`)
+- Grid sync for spawned profiles (reads real unit positions)
+- Perf overlay (renders HUD)
+- Killed/connected/disconnected event handlers
+
+**Scheduled (`spawn`)** — the virtual simulation layer (pure data, no engine objects):
+- Virtual profile movement (updating `[x,y]` in HashMaps — just math)
+- Virtual combat detection and resolution (spatial grid queries + dice rolls)
+- Morale calculation (number crunching)
+- Influence map recalculation (grid cell iteration)
+- OPCOM decision cycle (objective scoring, force allocation)
+- Convoy routing (waypoint advancement)
+- Intel decay (confidence value degradation)
+
+**Why scheduled works here:** Virtual profiles are HashMap data. Moving one is `_profile set ["pos", _newPos]` — microseconds. There's no rendering, no AI pathfinding, no collision. The scheduled environment's yielding (`sleep 0.001`) is perfect because we're doing 10,000 tiny operations that don't need frame-precise timing.
+
+### ALiVE's Virtual Simulator (Reference)
+
+ALiVE's `fnc_profileSimulator.sqf` processes profiles in a scheduled loop:
+- **4 profiles per tick** for movement simulation
+- **3 attacks per tick** for virtual combat resolution
+- Uses `diag_tickTime` delta for time-normalized movement
+- Combat detection via faction relationship checks + proximity
+- Damage applied to individual unit classnames within profiles
+- Vehicle hitpoint tracking for virtual vehicle combat
+- Amphibious detection (auto-assigns boats when crossing water)
+
+ALiVE's `fnc_profileGetDamageOutput.sqf` calculates damage per second:
+- Base damage scales with unit count: `0.015 × unitCount` for infantry
+- Hit chance varies by matchup (0.30–0.90)
+- Critical hit system with type-dependent crit damage
+- Vehicle type matrix (tank vs infantry, plane vs vehicle, etc.)
+- Artillery gets distance-based accuracy modifier
+
+### ATLAS.OS Virtual Simulation Design
+
+ATLAS improves on ALiVE's approach in several ways:
+
+#### 1. Lightweight Profile FSM (HashMap-based, no CBA/Arma FSM)
+
+Each virtual profile carries a `state` key that drives behavior. Transitions are a simple `switch` — zero overhead:
+
+```sqf
+// Virtual profile state machine — runs in scheduled loop
+// States: IDLE, MOVING, ENGAGING, WITHDRAWING, GARRISONED, RETREATING, ROUTED
+switch (_profile get "state") do {
+    case "IDLE": {
+        if (count (_profile get "waypoints") > 0) then {
+            _profile set ["state", "MOVING"];
+        };
+    };
+    case "MOVING": {
+        [_profile, _dt] call fnc_virtualMove;
+        // Check for contacts in current/adjacent grid cells
+        private _contacts = [_profile] call fnc_detectVirtualContacts;
+        if (count _contacts > 0) then {
+            _profile set ["state", "ENGAGING"];
+            _profile set ["engagedWith", _contacts];
+        };
+    };
+    case "ENGAGING": {
+        private _result = [_profile, _dt] call fnc_resolveVirtualCombat;
+        switch (_result) do {
+            case "WON":        { _profile set ["state", "MOVING"] };
+            case "LOST":       { _profile set ["state", "WITHDRAWING"] };
+            case "DRAW":       { /* stay engaging */ };
+            case "ROUTED":     { _profile set ["state", "ROUTED"] };
+        };
+    };
+    case "WITHDRAWING": {
+        [_profile, _dt, true] call fnc_virtualMove;  // move toward retreat waypoint
+        if (_profile get "morale" > 40) then {
+            _profile set ["state", "MOVING"];
+        };
+    };
+    case "GARRISONED": {
+        // Do nothing — waiting for OPCOM orders
+    };
+    case "ROUTED": {
+        // Flee at max speed toward nearest friendly objective
+        [_profile, _dt, true] call fnc_virtualMove;
+    };
+};
+```
+
+No FSM file, no CBA state machine, no overhead — just a string key and a switch.
+
+#### 2. Virtual Movement (Time-Delta Normalized)
+
+```sqf
+// fnc_virtualMove — scheduled, called per profile per sim tick
+params ["_profile", "_dt", ["_isRetreating", false]];
+
+private _waypoints = _profile get "waypoints";
+private _wpIdx = _profile get "wpIndex";
+if (_wpIdx >= count _waypoints) exitWith {};
+
+private _target = if (_isRetreating) then {
+    _profile get "retreatPos"
+} else {
+    (_waypoints select _wpIdx) get "pos"
+};
+
+private _pos = _profile get "pos";
+private _type = _profile get "type";
+
+// Speed from type lookup (m/s)
+private _baseSpeed = switch (_type) do {
+    case "infantry":    { 1.4 };
+    case "motorized":   { 11.0 };
+    case "mechanized":  { 8.3 };
+    case "armor":       { 7.2 };
+    case "air":         { 44.0 };
+    default             { 1.4 };
+};
+
+// Road bonus (1.4x if near road)
+private _roadBonus = if (_profile getOrDefault ["onRoad", false]) then { 1.4 } else { 1.0 };
+
+// Strength penalty (wounded units move slower)
+private _strengthMod = linearConversion [0, 1, _profile get "strength", 0.5, 1.0, true];
+
+private _speed = _baseSpeed * _roadBonus * _strengthMod;
+private _moveDist = _speed * _dt;
+
+private _dist = _pos distance2D _target;
+if (_moveDist >= _dist) then {
+    // Arrived at waypoint
+    _profile set ["pos", _target];
+    if (!_isRetreating) then {
+        _profile set ["wpIndex", _wpIdx + 1];
+    };
+    [_profile, _target] call EFUNC(main,gridMove);
+} else {
+    // Move toward target
+    private _dir = _pos getDir _target;
+    private _newPos = [
+        (_pos#0) + (sin _dir) * _moveDist,
+        (_pos#1) + (cos _dir) * _moveDist,
+        0
+    ];
+    _profile set ["pos", _newPos];
+    [_profile, _newPos] call EFUNC(main,gridMove);
+};
+```
+
+#### 3. Virtual Combat Detection (Spatial Grid)
+
+```sqf
+// fnc_detectVirtualContacts — uses spatial grid, not O(n²) scan
+params ["_profile"];
+
+private _pos = _profile get "pos";
+private _side = _profile get "side";
+private _contactRange = switch (_profile get "type") do {
+    case "infantry":    { 400 };
+    case "motorized":   { 600 };
+    case "armor":       { 800 };
+    case "air":         { 1500 };
+    default             { 400 };
+};
+
+private _nearbyIDs = [_pos, _contactRange] call EFUNC(main,gridQuery);
+private _contacts = [];
+
+{
+    if (_x == (_profile get "id")) then { continue };
+    private _other = EGVAR(main,profileRegistry) getOrDefault [_x, ""];
+    if !(_other isEqualType createHashMap) then { continue };
+    if ((_other get "side") isEqualTo _side) then { continue };
+    if ((_other get "state") in ["ROUTED", "GARRISONED"]) then { continue };
+
+    private _otherPos = _other get "pos";
+    if (_pos distance2D _otherPos <= _contactRange) then {
+        _contacts pushBack _x;
+    };
+} forEach _nearbyIDs;
+
+_contacts
+```
+
+#### 4. Virtual Combat Resolution (Improved over ALiVE)
+
+ALiVE uses flat damage-per-second with hit chance. ATLAS adds:
+- **Force ratio** — 3:1 advantage = faster attrition on the weaker side
+- **Morale** — low morale profiles deal less damage, break faster
+- **Supply** — low ammo = reduced damage output
+- **Terrain** — defender in urban/forest gets defensive bonus
+- **Type effectiveness** — armor matrix (AT vs armor, AA vs air, etc.)
+
+```sqf
+// fnc_resolveVirtualCombat — called per engaging profile per sim tick
+params ["_profile", "_dt"];
+
+private _engaged = _profile getOrDefault ["engagedWith", []];
+if (_engaged isEqualTo []) exitWith { "WON" };
+
+// Calculate own combat power
+private _ownStrength = _profile get "strength";
+private _ownCount = count (_profile get "classnames");
+private _ownMorale = (_profile getOrDefault ["morale", 80]) / 100;
+private _ownAmmo = (_profile getOrDefault ["ammoLevel", 1.0]);
+private _ownType = _profile get "type";
+
+private _ownPower = _ownCount * _ownStrength * _ownMorale * _ownAmmo;
+
+// Apply type effectiveness
+private _typeMultiplier = 1.0;
+
+// Sum enemy combat power
+private _enemyPower = 0;
+private _aliveContacts = [];
+{
+    private _enemy = EGVAR(main,profileRegistry) getOrDefault [_x, ""];
+    if !(_enemy isEqualType createHashMap) then { continue };
+    if ((_enemy get "strength") <= 0) then { continue };
+
+    private _eCount = count (_enemy get "classnames");
+    private _eStr = _enemy get "strength";
+    private _eMorale = (_enemy getOrDefault ["morale", 80]) / 100;
+    private _eAmmo = (_enemy getOrDefault ["ammoLevel", 1.0]);
+
+    _enemyPower = _enemyPower + (_eCount * _eStr * _eMorale * _eAmmo);
+    _aliveContacts pushBack _x;
+} forEach _engaged;
+
+if (_aliveContacts isEqualTo []) exitWith { "WON" };
+_profile set ["engagedWith", _aliveContacts];
+
+// Force ratio attrition
+private _totalPower = _ownPower + _enemyPower;
+if (_totalPower <= 0) exitWith { "DRAW" };
+
+// Lanchester-style: damage proportional to enemy power / total
+private _damageToSelf = ((_enemyPower / _totalPower) * 0.05 * _dt) + (random 0.01 * _dt);
+private _damageToEnemy = ((_ownPower / _totalPower) * 0.05 * _dt) + (random 0.01 * _dt);
+
+// Apply damage to self
+private _newStrength = ((_profile get "strength") - _damageToSelf) max 0;
+_profile set ["strength", _newStrength];
+
+// Apply damage to enemies (distributed evenly)
+{
+    private _enemy = EGVAR(main,profileRegistry) getOrDefault [_x, ""];
+    if (_enemy isEqualType createHashMap) then {
+        private _eStr = ((_enemy get "strength") - (_damageToEnemy / count _aliveContacts)) max 0;
+        _enemy set ["strength", _eStr];
+        if (_eStr <= 0.05) then {
+            [_x, "virtualCombat"] call EFUNC(profile,destroy);
+        };
+    };
+} forEach _aliveContacts;
+
+// Check morale-based outcomes
+private _morale = _profile getOrDefault ["morale", 80];
+if (_newStrength <= 0.05) exitWith { "LOST" };
+if (_newStrength < 0.3 && _morale < 30) exitWith { "ROUTED" };
+if (_newStrength < 0.5 && _morale < 50) exitWith { "LOST" };
+
+"DRAW"
+```
+
+#### 5. Main Simulation Loop (Scheduled)
+
+```sqf
+// fnc_virtualSimulator.sqf — THE virtual world simulation loop
+// Runs in scheduled environment. Yields every N profiles.
+// This is the heart of ATLAS.OS — the virtual battlefield.
+
+if (!isServer) exitWith {};
+
+private _simInterval = 0.1;  // 100ms between full passes
+
+while {GVAR(simulatorRunning)} do {
+    private _now = diag_tickTime;
+    private _registry = EGVAR(main,profileRegistry);
+    private _count = count _registry;
+    private _processed = 0;
+
+    {
+        private _profile = _y;
+
+        // Skip spawned profiles (real Arma AI handles them)
+        if (_profile get "state" isEqualTo "spawned") then { continue };
+        // Skip profiles with no work to do
+        if (_profile get "state" isEqualTo "GARRISONED") then { continue };
+
+        // Time delta since this profile was last simulated
+        private _lastSim = _profile getOrDefault ["_lastSimTime", _now];
+        private _dt = _now - _lastSim;
+        if (_dt < 0.05) then { continue };  // min 50ms between ticks per profile
+
+        // Run the lightweight FSM
+        [_profile, _dt] call FUNC(virtualFSMTick);
+
+        _profile set ["_lastSimTime", _now];
+        _processed = _processed + 1;
+
+        // Yield every 50 profiles to prevent scheduler starvation
+        if (_processed % 50 == 0) then {
+            sleep 0.001;
+        };
+    } forEach _registry;
+
+    // Wait before next full pass
+    sleep _simInterval;
+};
+```
+
+### Key Differences from ALiVE
+
+| Aspect | ALiVE | ATLAS.OS |
+|--------|-------|----------|
+| Processing | 4 profiles/tick, unscheduled PFH | All eligible profiles, scheduled with yield |
+| Combat model | Flat DPS with hit chance | Lanchester force-ratio with morale/ammo/type modifiers |
+| States | spawned/virtual binary | 7-state FSM (IDLE/MOVING/ENGAGING/WITHDRAWING/GARRISONED/RETREATING/ROUTED) |
+| Detection | Faction friendship + proximity scan | Spatial grid query (O(nearby) not O(n)) |
+| Morale | Not modeled | Affects combat output, causes withdrawal/rout |
+| Supply | Not modeled | Low ammo reduces combat effectiveness |
+| Resolution | Damage accumulates per unit | Force ratio determines attrition rate both sides |
+| Movement | Speed × time delta | Speed × road × strength × time delta |
+| Yielding | Bounded by frame budget | `sleep 0.001` every 50 profiles — never blocks frames |
+
+### Hybrid Architecture Summary
+
+```
+┌─────────────────────────────────────────────────┐
+│  UNSCHEDULED (PFH)                              │
+│  Athena-style auto-budget scheduler             │
+│  ─ Spawn/despawn (1 per frame max)              │
+│  ─ Player grid tracking (every 2s)             │
+│  ─ Spawned profile grid sync (every 5s)         │
+│  ─ Perf overlay                                 │
+├─────────────────────────────────────────────────┤
+│  SCHEDULED (spawn)                              │
+│  Virtual simulator loop                         │
+│  ─ Profile FSM tick (movement, combat, morale)  │
+│  ─ OPCOM decision cycle                         │
+│  ─ Influence map recalculation                  │
+│  ─ Convoy routing                               │
+│  ─ Intel decay                                  │
+│  ─ Yields every 50 items (sleep 0.001)          │
+├─────────────────────────────────────────────────┤
+│  EVENT-DRIVEN (CBA events)                      │
+│  Zero cost when idle                            │
+│  ─ Player area changed → spawn/despawn check    │
+│  ─ Profile destroyed → GC queue                 │
+│  ─ Objective captured → OPCOM re-evaluate       │
+│  ─ Supply threshold → LOGCOM request            │
+└─────────────────────────────────────────────────┘
+```
+
+### Files to Create (Virtual Simulator)
+
+| File | Module | Description |
+|------|--------|-------------|
+| `fnc_virtualSimulator.sqf` | atlas_profile | Main scheduled loop — iterates all virtual profiles |
+| `fnc_virtualFSMTick.sqf` | atlas_profile | Per-profile FSM switch (IDLE/MOVING/ENGAGING/etc.) |
+| `fnc_virtualMove.sqf` | atlas_profile | Position update along waypoints with speed model |
+| `fnc_detectVirtualContacts.sqf` | atlas_profile | Spatial grid query for nearby enemy profiles |
+| `fnc_resolveVirtualCombat.sqf` | atlas_profile | Lanchester force-ratio combat resolution |
+| `fnc_virtualCombatDamage.sqf` | atlas_profile | Type effectiveness matrix and damage calculation |
+
+---
+
 ## Testing in Arma 3
 
 ### Quick Test
