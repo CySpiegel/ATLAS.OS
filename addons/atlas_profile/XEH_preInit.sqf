@@ -1,9 +1,28 @@
-// ============================================================================
-// ATLAS.OS Profile Handler — Pre-Initialization
-// ============================================================================
 #include "script_component.hpp"
 
-LOG("Pre-initialization starting...");
+LOG("PreInit starting");
+
+// Compile all functions
+PREP(init);
+PREP(create);
+PREP(destroy);
+PREP(spawn);
+PREP(despawn);
+PREP(checkSpawnDespawn);
+PREP(getByID);
+PREP(getBySide);
+PREP(getByArea);
+PREP(getByObjective);
+PREP(getSpawned);
+PREP(getVirtual);
+PREP(getUnitCount);
+PREP(setPosition);
+PREP(addWaypoint);
+PREP(removeWaypoint);
+PREP(processWaypoints);
+PREP(updateState);
+PREP(serialize);
+PREP(deserialize);
 
 // Register module
 [
@@ -17,35 +36,31 @@ LOG("Pre-initialization starting...");
             "ATLAS_profile_destroyed",
             "ATLAS_profile_spawned",
             "ATLAS_profile_despawned",
-            "ATLAS_profile_updated"
+            "ATLAS_profile_moved",
+            "ATLAS_profile_stateChanged"
         ]]
     ]
 ] call EFUNC(main,registerModule);
 
-// ---------------------------------------------------------------------------
-// CBA Settings — Profile Handler
-// ---------------------------------------------------------------------------
-
-// Spawn Distance
+// CBA Settings
 [
     "ATLAS_profile_spawnDistance",
     "SLIDER",
-    ["Spawn Distance (m)", "Distance in meters at which profiled groups are spawned into the game world when players approach. Lower values improve performance but units appear closer. Higher values provide smoother immersion but increase active unit count. Must be less than Despawn Distance. Recommended: 1200-1800m."],
-    ["ATLAS.OS", "Profile Handler"],
+    ["Spawn Distance (m)", "Distance at which virtual profiles spawn into real AI units when players approach."],
+    ["ATLAS.OS", "Profile"],
     [500, 3000, 1500, 0],
     1,
     {}
 ] call CBA_fnc_addSetting;
 
-// Despawn Distance
 [
     "ATLAS_profile_despawnDistance",
     "SLIDER",
-    ["Despawn Distance (m)", "Distance in meters at which spawned groups are converted back to profiles when all players are beyond this range. Must be greater than Spawn Distance to prevent rapid spawn/despawn cycling (hysteresis). Recommended: 300-500m greater than spawn distance."],
-    ["ATLAS.OS", "Profile Handler"],
+    ["Despawn Distance (m)", "Distance beyond which spawned groups revert to virtual profiles. Must exceed spawn distance for hysteresis."],
+    ["ATLAS.OS", "Profile"],
     [750, 4000, 1800, 0],
     1,
     {}
 ] call CBA_fnc_addSetting;
 
-LOG("Pre-initialization complete.");
+LOG("PreInit complete");
