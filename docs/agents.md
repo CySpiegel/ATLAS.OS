@@ -1,5 +1,88 @@
 # ATLAS.OS — Developer Workflow & Build Guide
 
+## Current Implementation Status (as of 2026-03-19)
+
+### What's Implemented and Working
+
+| Module | Functions | Status |
+|--------|-----------|--------|
+| `atlas_main` | 18 functions | Core framework, registries, spatial grid, scheduler, auto-budget |
+| `atlas_profile` | 27 functions | Virtual profiles, spawn/despawn, FSM, virtual combat, movement |
+| `atlas_placement` | 10 functions | Eden module, force generation, objective auto-detection |
+| **Total** | **55 functions** | **104 SQF files compiled, 24 PBOs building clean** |
+
+### Architecture (Three Layers)
+
+```
+┌─────────────────────────────────────────────────┐
+│  UNSCHEDULED (Single PFH — scheduler)           │
+│  atlas_main_fnc_schedulerTick                   │
+│  ─ Player grid cell tracking (every 2s)         │
+│  ─ Spawned profile grid sync (every 5s)         │
+│  ─ Auto-budget recalculation (every 2s)         │
+│  ─ Spawn/despawn (event-driven, max 1/frame)    │
+├─────────────────────────────────────────────────┤
+│  SCHEDULED (spawn — virtual simulator)          │
+│  atlas_profile_fnc_virtualSimulator             │
+│  ─ Profile FSM tick (7 states)                  │
+│  ─ Virtual movement (time-delta, road/speed)    │
+│  ─ Contact detection (spatial grid)             │
+│  ─ Lanchester combat resolution                 │
+│  ─ Morale/withdrawal/rout                       │
+│  ─ Yields every 50 profiles (sleep 0.001)       │
+├─────────────────────────────────────────────────┤
+│  EVENT-DRIVEN (CBA events — zero idle cost)     │
+│  ─ ATLAS_player_areaChanged → spawn/despawn     │
+│  ─ ATLAS_profile_destroyed → cleanup            │
+│  ─ ATLAS_placement_complete → OPCOM notify      │
+│  ─ ATLAS_performance_tierChanged → degrade      │
+└─────────────────────────────────────────────────┘
+```
+
+### Key Files for New Agents
+
+If you're an agent picking up development, start here:
+
+| File | What it does |
+|------|-------------|
+| `addons/atlas_main/XEH_preInit.sqf` | All PREP calls, CBA settings, registries, module self-registration |
+| `addons/atlas_main/XEH_postInit.sqf` | Server init, scheduler start, perf overlay |
+| `addons/atlas_main/functions/fnc_schedulerTick.sqf` | The single PFH — priority exitWith chain |
+| `addons/atlas_main/functions/fnc_autoBudget.sqf` | EMA FPS tracking, budget scaling |
+| `addons/atlas_profile/functions/fnc_virtualSimulator.sqf` | Virtual world simulation loop (scheduled) |
+| `addons/atlas_profile/functions/fnc_virtualFSMTick.sqf` | Per-profile 7-state FSM |
+| `addons/atlas_profile/functions/fnc_resolveVirtualCombat.sqf` | Lanchester combat model |
+| `addons/atlas_placement/functions/fnc_moduleInit.sqf` | Eden module callback pattern |
+| `docs/ARCHITECTURE.md` | Full 11,478-line architecture spec (29 sections) |
+
+### What Needs To Be Done Next
+
+1. **`atlas_opcom`** — AI commander. ASSESS→PLAN→EXECUTE state machine. Scores objectives, allocates profiles as task forces, issues waypoint orders. Should run in the **scheduled** virtual simulator, not as a PFH.
+
+2. **Custom PAA icons** — All Eden modules currently use vanilla fallback icon (`\a3\Modules_F\data\iconModule_ca.paa`). Need military-styled icons per module.
+
+3. **Eden module testing** — Modules now appear under Logic → ATLAS.OS in Eden. Need to verify all 9 modules (Main, Placement, OPCOM, CQB, ATO, Civilian, Insertion, Persistence, Support) show and configure correctly.
+
+4. **Objective module** — `ATLAS_Module_Objective` needs a config.cpp entry so mission makers can place objective markers and sync them to OPCOM/Placement.
+
+5. **Persistence** — Save/load virtual profile state to profileNamespace so campaigns survive restarts.
+
+### Known Issues
+
+- **PBO naming** — HEMTT produces `atlas_atlas_main.pbo` (double prefix). This works but looks odd. The `$PBOPREFIX$` files are correct (`z\atlas\addons\atlas_main`), so internal paths resolve fine.
+- **Module function callback** — Eden 3DEN calls module `function` with a string `_this` (classname), not `[logic, units, activated]`. All moduleInit functions handle this with `if (_this isEqualType "") exitWith {}`.
+- **No individual module PFHs** — ALL periodic work goes through the scheduler or virtual simulator. Modules must NOT call `CBA_fnc_addPerFrameHandler` directly.
+
+### Rules for Implementing New Modules
+
+1. **Never create a PFH** — register with the scheduler or add to the virtual simulator loop
+2. **Use events** for reactive work — subscribe to CBA events, don't poll
+3. **Scheduled for virtual work** — pure HashMap math goes in the scheduled virtual simulator
+4. **Unscheduled for real-world work** — anything touching actual game objects goes through the scheduler PFH
+5. **moduleInit must handle string _this** — Eden 3DEN passes classname string, not array
+6. **Redeclare Module_F hierarchy** — every CfgVehicles module must redeclare the full `Module_F` → `AttributesBase` class chain for HEMTT validation
+7. **Icons use vanilla fallback** — `\a3\Modules_F\data\iconModule_ca.paa` until custom PAAs are created
+
 ## Project Pattern (mirrors athena)
 
 This project follows the same architecture patterns as the **athena** project. If something looks unfamiliar, check `P:/athena` for reference.
