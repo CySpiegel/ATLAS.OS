@@ -16,7 +16,7 @@ Beyond performance, ALiVE lacks systems that modern military simulation demands:
 
 Build a complete replacement that achieves **full feature parity** with every ALiVE module (24 modules) while adding **24 entirely new systems** that ALiVE never covered. The framework must support:
 
-- **2,000+ virtual profiles** with full lifecycle management
+- **10,000+ virtual profiles** with full lifecycle management
 - **500 spawned AI** distributed across 3–4 headless clients
 - **40 concurrent players** on a dedicated server
 - **Cross-server persistent campaigns** via PostgreSQL
@@ -138,7 +138,7 @@ Full insurgency simulation with cell-based organization, IED placement/detection
 | **Spawn management** | Fixed radius, thrashing | Hysteresis + event-driven |
 | **Civilian lifecycle** | Create/destroy constantly | Object pooling and reuse |
 | **Modularity** | Tightly coupled via globals | Event bus decoupling |
-| **Max scale** | ~200 profiles, 10 players | 2,000+ profiles, 40 players, 500 AI |
+| **Max scale** | ~200 profiles, 10 players | 10,000+ profiles, 40 players, 500 AI |
 | **Medical** | Not modeled | Full NATO Role 1–3 MEDEVAC chain |
 | **AI behavior** | Fight to the death | Morale-driven: cautious, break, rout, surrender |
 | **Weather** | Visual only | Affects all operations (CAS, movement, helo ops) |
@@ -160,7 +160,7 @@ Full insurgency simulation with cell-based organization, IED placement/detection
 | Mod API hooks | **14** extension points for third-party mods |
 | Map presets | **8** (Altis ×3, Stratis, Takistan, Chernarus, Tanoa, Livonia) |
 
-For a Tier 1 mission (2,000 profiles, 40 players), the spatial grid reduces proximity distance checks from **40,000 per cycle to ~120** — a reduction of over 300x.
+For a Tier 1 mission (10,000 profiles, 40 players), the spatial grid reduces proximity distance checks from **400,000 per cycle to ~120** — a reduction of over 3,300x.
 
 ---
 
