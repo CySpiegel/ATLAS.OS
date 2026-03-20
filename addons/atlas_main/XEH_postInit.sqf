@@ -7,21 +7,7 @@ if (isServer) then {
 
     LOG_1("Registered modules: %1", keys GVAR(moduleRegistry));
 
-    // Player grid-cell tracking — fires ATLAS_player_areaChanged events
-    [{
-        private _gridSize = GVAR(gridSize);
-        {
-            private _player = _x;
-            private _pos = getPosATL _player;
-            private _cell = [floor ((_pos#0) / _gridSize), floor ((_pos#1) / _gridSize)];
-            private _lastCell = _player getVariable [QGVAR(lastCell), [-1,-1]];
-            if (!(_cell isEqualTo _lastCell)) then {
-                _player setVariable [QGVAR(lastCell), _cell];
-                ["ATLAS_player_areaChanged", [_player, _cell, _lastCell]] call CBA_fnc_localEvent;
-            };
-        } forEach allPlayers;
-    }, 2] call CBA_fnc_addPerFrameHandler;
-
+    // Mission event handlers
     addMissionEventHandler ["PlayerConnected", {
         params ["_id", "_uid", "_name", "_jip", "_owner", "_idstr"];
         ["ATLAS_player_connected", [_uid, _name, _jip, _owner]] call CBA_fnc_localEvent;
@@ -35,17 +21,31 @@ if (isServer) then {
     addMissionEventHandler ["MPEnded", {
         ["ATLAS_mission_ending", []] call CBA_fnc_localEvent;
     }];
+
+    // Start the scheduler — replaces all individual PFHs
+    // This starts both the unscheduled PFH dispatcher AND the scheduled virtual simulator
+    [] call FUNC(initScheduler);
 };
 
-if (hasInterface && {GVAR(perfMonitor)}) then {
+// Client-side perf overlay (only when enabled)
+if (hasInterface) then {
     [{
         if (!GVAR(perfMonitor)) exitWith {};
+        private _simProc = EGVAR(profile,simLastProcessed);
+        private _simMs = EGVAR(profile,simLastDuration);
+        if (isNil "_simProc") then { _simProc = 0 };
+        if (isNil "_simMs") then { _simMs = 0 };
         hintSilent format [
-            "ATLAS.OS\n---\nProfiles: %1\nGrid Cells: %2\nFPS: %3\nModules: %4",
+            "ATLAS.OS v%1\n─────────────\nProfiles: %2\nGrid Cells: %3\nModules: %4\nFPS: %5\nTier: %6\nBudget: %7ms\n─────────────\nVirtual Sim\nProcessed: %8\nDuration: %9ms",
+            GVAR(version),
             count GVAR(profileRegistry),
             count GVAR(spatialGrid),
+            count GVAR(moduleRegistry),
             diag_fps toFixed 1,
-            count GVAR(moduleRegistry)
+            GVAR(performanceTier),
+            GVAR(schedulerTotalBudget) toFixed 2,
+            _simProc,
+            _simMs toFixed 2
         ];
     }, 2] call CBA_fnc_addPerFrameHandler;
 };

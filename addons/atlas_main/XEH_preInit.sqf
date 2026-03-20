@@ -17,6 +17,9 @@ PREP(setting);
 PREP(serialize);
 PREP(deserialize);
 PREP(validateProfile);
+PREP(initScheduler);
+PREP(schedulerTick);
+PREP(autoBudget);
 
 LOG("PreInit starting");
 
@@ -99,5 +102,29 @@ GVAR(gridSize)          = ATLAS_GRID_SIZE_DEFAULT;
     1,
     {}
 ] call CBA_fnc_addSetting;
+
+// --- Scheduler Settings ---
+[
+    QGVAR(schedulerTargetFPS),
+    "SLIDER",
+    ["Scheduler Target FPS", "Auto-budget keeps server FPS above this. Lower = more processing budget, higher = smoother frames."],
+    ["ATLAS.OS", "Performance"],
+    [20, 60, 40, 0],
+    1,
+    {}
+] call CBA_fnc_addSetting;
+
+[
+    QGVAR(schedulerFramePct),
+    "SLIDER",
+    ["Scheduler Frame %", "Max percentage of frame time the scheduler can use. 10-15% for listen server, 20-30% for dedicated."],
+    ["ATLAS.OS", "Performance"],
+    [5, 50, 15, 0],
+    1,
+    {}
+] call CBA_fnc_addSetting;
+
+// Performance tier state
+GVAR(performanceTier) = "NORMAL";
 
 LOG("PreInit complete");

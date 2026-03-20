@@ -23,6 +23,13 @@ PREP(processWaypoints);
 PREP(updateState);
 PREP(serialize);
 PREP(deserialize);
+PREP(virtualSimulator);
+PREP(virtualFSMTick);
+PREP(virtualMove);
+PREP(detectVirtualContacts);
+PREP(resolveVirtualCombat);
+PREP(virtualCombatDamage);
+PREP(findRetreatPosition);
 
 // Register module
 [
